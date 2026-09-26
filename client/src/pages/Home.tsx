@@ -3,6 +3,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useTheme } from "@/contexts/ThemeContext";
 import { trpc } from "@/lib/trpc";
+import { advanceAdminShortcutTap } from "@/lib/admin-shortcut";
+import { shouldRenderPublicFooter } from "@/lib/public-footer";
 import { Streamdown } from "streamdown";
 import {
   getAuthErrorMessage,
@@ -212,12 +214,9 @@ function PublicFooter() {
       return false;
     }
   });
+  if (!shouldRenderPublicFooter(links.length)) return null;
   return (
     <footer className="w-full border-t border-border/60 bg-background/80 px-4 py-4 text-center text-xs text-muted-foreground">
-      <p>
-        {content["footer.credit"] ||
-          "Powered by SFCH Limited in Cooperation with Trendythread"}
-      </p>
       {links.length > 0 && (
         <nav
           className="mt-2 flex flex-wrap justify-center gap-x-4 gap-y-2"
@@ -3111,9 +3110,9 @@ function AppShell({ user }: { user: any }) {
               type="button"
               aria-label="Gridora logo"
               onClick={() => {
-                const next = logoTaps + 1;
-                setLogoTaps(next >= 20 ? 0 : next);
-                if (next >= 20) window.location.href = "/admin";
+                const next = advanceAdminShortcutTap(logoTaps);
+                setLogoTaps(next.tapCount);
+                if (next.openAdmin) window.location.href = "/admin";
               }}
             >
               <Brand />

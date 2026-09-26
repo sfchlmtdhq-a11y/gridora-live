@@ -593,25 +593,6 @@ function Dashboard() {
             </div>
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <div className="sm:col-span-2">
-              <label className="text-xs font-bold text-muted-foreground">
-                Footer credit
-              </label>
-              <Input
-                value={getContent(
-                  "footer.credit",
-                  "Powered by SFCH Limited in Cooperation with Trendythread"
-                )}
-                onChange={e =>
-                  setContentDraft({
-                    ...contentDraft,
-                    "footer.credit": e.target.value,
-                  })
-                }
-                className="mt-1"
-                maxLength={200}
-              />
-            </div>
             {[
               ["social.instagram", "Instagram URL"],
               ["social.facebook", "Facebook URL"],
