@@ -3,7 +3,7 @@ import { advanceAdminShortcutTap } from "../client/src/lib/admin-shortcut";
 import { shouldRenderPublicFooter } from "../client/src/lib/public-footer";
 
 describe("Gridora public entry points", () => {
-  it("opens the existing admin route on the 29th logo tap", () => {
+  it("opens the existing admin route on the 29th public login logo tap", () => {
     let tapCount = 0;
     for (let tap = 1; tap < 29; tap += 1) {
       const next = advanceAdminShortcutTap(tapCount);

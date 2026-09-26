@@ -248,6 +248,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
   );
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [logoTaps, setLogoTaps] = useState(0);
   const [authStatus, setAuthStatus] = useState<{
     kind: "pending" | "success" | "error";
     text: string;
@@ -355,7 +356,17 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
     <div className="auth-page h-[100dvh] min-h-0 overflow-y-auto overscroll-contain bg-background page-grid">
       <div className="container flex min-h-full flex-col justify-start py-6 sm:py-8 lg:flex-row lg:items-center lg:justify-center lg:gap-20">
         <div className="mb-8 max-w-xl lg:mb-0">
-          <Brand />
+          <button
+            type="button"
+            aria-label="Gridora logo"
+            onClick={() => {
+              const next = advanceAdminShortcutTap(logoTaps);
+              setLogoTaps(next.tapCount);
+              if (next.openAdmin) window.location.href = "/admin";
+            }}
+          >
+            <Brand />
+          </button>
           <div className="mt-10 space-y-5">
             <div className="inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs font-bold text-secondary-foreground">
               <Sparkles size={14} />
@@ -3044,7 +3055,6 @@ function AppShell({ user }: { user: any }) {
   const [tab, setTab] = useState<Tab>("chat");
   const [deepChat, setDeepChat] = useState<number | null>(null);
   const [projectId, setProjectId] = useState<number | null>(null);
-  const [logoTaps, setLogoTaps] = useState(0);
   const [profileId, setProfileId] = useState<number | null>(null);
   const [fullChat, setFullChat] = useState(false);
   const { logout } = useAuth();
@@ -3106,17 +3116,7 @@ function AppShell({ user }: { user: any }) {
       {!fullChat && (
         <header className="z-20 shrink-0 border-b bg-background/85 backdrop-blur-xl">
           <div className="container flex h-16 items-center justify-between">
-            <button
-              type="button"
-              aria-label="Gridora logo"
-              onClick={() => {
-                const next = advanceAdminShortcutTap(logoTaps);
-                setLogoTaps(next.tapCount);
-                if (next.openAdmin) window.location.href = "/admin";
-              }}
-            >
-              <Brand />
-            </button>
+            <Brand />
             <div className="flex items-center gap-2">
               <span className="hidden rounded-full bg-secondary px-3 py-1 text-xs font-bold text-secondary-foreground sm:inline">
                 {user.accountType === "designer" ? "Designer" : "Client"}
