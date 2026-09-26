@@ -1,0 +1,1 @@
+ALTER TABLE `challenges` ADD `challengeStatus` enum('pending','approved','denied') DEFAULT 'pending' NOT NULL;

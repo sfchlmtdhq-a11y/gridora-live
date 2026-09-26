@@ -1,0 +1,1 @@
+ALTER TABLE `admin_users` ADD `isPrimary` boolean DEFAULT false NOT NULL;
