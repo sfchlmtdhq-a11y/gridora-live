@@ -139,6 +139,47 @@ export const gridoraAIRouter = router({
         });
       return { success: true };
     }),
+  deleteMemory: protectedProcedure.mutation(async ({ ctx }) => {
+    const user = getActiveUser(ctx.user);
+    const db = await requireDb();
+    await db.delete(gridoraAiProfiles).where(eq(gridoraAiProfiles.userId, user.id));
+    return { success: true };
+  }),
+  deleteThread: protectedProcedure
+    .input(z.object({ threadId: z.number().int().positive() }))
+    .mutation(async ({ ctx, input }) => {
+      const user = getActiveUser(ctx.user);
+      const db = await requireDb();
+      const thread = (
+        await db
+          .select({ id: gridoraAiThreads.id })
+          .from(gridoraAiThreads)
+          .where(
+            and(
+              eq(gridoraAiThreads.id, input.threadId),
+              eq(gridoraAiThreads.userId, user.id)
+            )
+          )
+          .limit(1)
+      )[0];
+      if (!thread)
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Conversation not found",
+        });
+      await db
+        .delete(gridoraAiMessages)
+        .where(eq(gridoraAiMessages.threadId, thread.id));
+      await db
+        .delete(gridoraAiThreads)
+        .where(
+          and(
+            eq(gridoraAiThreads.id, thread.id),
+            eq(gridoraAiThreads.userId, user.id)
+          )
+        );
+      return { success: true };
+    }),
   send: protectedProcedure
     .input(
       z.object({

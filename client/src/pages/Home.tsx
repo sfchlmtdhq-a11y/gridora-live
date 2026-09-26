@@ -6,6 +6,7 @@ import { trpc } from "@/lib/trpc";
 import { advanceAdminShortcutTap } from "@/lib/admin-shortcut";
 import { shouldRenderPublicFooter } from "@/lib/public-footer";
 import { Streamdown } from "streamdown";
+import { isGridoraPrimaryAdmin } from "@shared/admin-access";
 import {
   getAuthErrorMessage,
   getAuthFieldFeedback,
@@ -248,7 +249,6 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
   );
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
-  const [logoTaps, setLogoTaps] = useState(0);
   const [authStatus, setAuthStatus] = useState<{
     kind: "pending" | "success" | "error";
     text: string;
@@ -356,17 +356,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
     <div className="auth-page h-[100dvh] min-h-0 overflow-y-auto overscroll-contain bg-background page-grid">
       <div className="container flex min-h-full flex-col justify-start py-6 sm:py-8 lg:flex-row lg:items-center lg:justify-center lg:gap-20">
         <div className="mb-8 max-w-xl lg:mb-0">
-          <button
-            type="button"
-            aria-label="Gridora logo"
-            onClick={() => {
-              const next = advanceAdminShortcutTap(logoTaps);
-              setLogoTaps(next.tapCount);
-              if (next.openAdmin) window.location.href = "/admin";
-            }}
-          >
-            <Brand />
-          </button>
+          <Brand />
           <div className="mt-10 space-y-5">
             <div className="inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs font-bold text-secondary-foreground">
               <Sparkles size={14} />
@@ -2722,7 +2712,13 @@ function SettingsView({
   );
 }
 
-function GridoraAiWidget() {
+function GridoraAiWidget({
+  immersive,
+  onImmersiveChange,
+}: {
+  immersive: boolean;
+  onImmersiveChange: (active: boolean) => void;
+}) {
   const utils = trpc.useUtils();
   const [open, setOpen] = useState(false);
   const [threadId, setThreadId] = useState<number | null>(null);
@@ -2761,6 +2757,23 @@ function GridoraAiWidget() {
       toast.success("Gridora AI design notes saved for your account");
       void memory.refetch();
       setMemoryDraft(null);
+    },
+    onError: error => toast.error(error.message),
+  });
+  const deleteMemory = trpc.gridoraAI.deleteMemory.useMutation({
+    onSuccess: () => {
+      toast.success("Your Gridora AI design notes were deleted");
+      void memory.refetch();
+      setMemoryDraft(null);
+    },
+    onError: error => toast.error(error.message),
+  });
+  const deleteThread = trpc.gridoraAI.deleteThread.useMutation({
+    onSuccess: () => {
+      toast.success("Gridora AI conversation deleted");
+      setThreadId(null);
+      setNewThread(false);
+      void threads.refetch();
     },
     onError: error => toast.error(error.message),
   });
@@ -2806,14 +2819,12 @@ function GridoraAiWidget() {
     <>
       {open && (
         <section
-          className="fixed bottom-[calc(5.25rem+env(safe-area-inset-bottom))] right-3 z-50 flex w-[min(94vw,25rem)] flex-col overflow-hidden rounded-3xl border bg-card shadow-2xl sm:right-5"
-          style={{
-            maxHeight: "calc(100dvh - 7.5rem - env(safe-area-inset-bottom))",
-            height: "min(34rem, 72dvh)",
-          }}
+          className="fixed inset-0 z-50 flex h-[100dvh] w-screen flex-col overflow-hidden bg-card"
           aria-label="Gridora AI chat"
+          role="dialog"
+          aria-modal="true"
         >
-          <header className="flex shrink-0 items-center gap-3 border-b p-3">
+          <header className="flex shrink-0 items-center gap-3 border-b px-3 pb-3 pt-[calc(.75rem+env(safe-area-inset-top))] sm:px-5">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-primary/10 text-primary">
               <Sparkles size={19} />
             </div>
@@ -2836,7 +2847,10 @@ function GridoraAiWidget() {
             <button
               type="button"
               className="rounded-lg p-2 hover:bg-muted"
-              onClick={() => setOpen(false)}
+              onClick={() => {
+                setOpen(false);
+                onImmersiveChange(false);
+              }}
               aria-label="Close Gridora AI"
             >
               <X size={17} />
@@ -2873,6 +2887,26 @@ function GridoraAiWidget() {
               ))}
             </select>
           </div>
+          <div className="flex shrink-0 justify-end border-b px-3 py-1.5 sm:px-5">
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-8 text-xs text-destructive"
+              disabled={!threadId || deleteThread.isPending}
+              onClick={() => {
+                if (
+                  threadId &&
+                  window.confirm(
+                    "Permanently delete this Gridora AI conversation and its messages?"
+                  )
+                )
+                  deleteThread.mutate({ threadId });
+              }}
+            >
+              <X size={14} /> Delete conversation
+            </Button>
+          </div>
           <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
             {memoryDraft !== null && (
               <div className="rounded-xl border border-primary/20 bg-primary/5 p-3">
@@ -2906,6 +2940,25 @@ function GridoraAiWidget() {
                     }
                   >
                     Save notes
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-destructive"
+                    disabled={
+                      deleteMemory.isPending ||
+                      !memory.data?.designMemory?.trim()
+                    }
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          "Permanently delete your saved Gridora AI design notes?"
+                        )
+                      )
+                        deleteMemory.mutate();
+                    }}
+                  >
+                    <X size={14} /> Delete notes
                   </Button>
                 </div>
               </div>
@@ -3027,7 +3080,7 @@ function GridoraAiWidget() {
               )}
             </Button>
           </form>
-          <div className="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2 text-[10px] text-muted-foreground">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2 pb-[calc(.5rem+env(safe-area-inset-bottom))] text-[10px] text-muted-foreground">
             <span>Graphic-design help only · private to your account</span>
             <button
               type="button"
@@ -3039,15 +3092,20 @@ function GridoraAiWidget() {
           </div>
         </section>
       )}
-      <button
-        type="button"
-        className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-4 z-40 grid h-14 w-14 place-items-center rounded-full bg-primary text-primary-foreground shadow-xl shadow-primary/30 transition hover:scale-105 active:scale-95"
-        onClick={() => setOpen(value => !value)}
-        aria-label={open ? "Close Gridora AI" : "Open Gridora AI"}
-        aria-expanded={open}
-      >
-        {open ? <X size={22} /> : <Sparkles size={23} />}
-      </button>
+      {!open && !immersive && (
+        <button
+          type="button"
+          className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-4 z-40 grid h-14 w-14 place-items-center rounded-full bg-primary text-primary-foreground shadow-xl shadow-primary/30 transition hover:scale-105 active:scale-95"
+          onClick={() => {
+            setOpen(true);
+            onImmersiveChange(true);
+          }}
+          aria-label="Open Gridora AI full-screen chat"
+          aria-expanded={false}
+        >
+          <Sparkles size={23} />
+        </button>
+      )}
     </>
   );
 }
@@ -3055,9 +3113,10 @@ function AppShell({ user }: { user: any }) {
   const [tab, setTab] = useState<Tab>("chat");
   const [deepChat, setDeepChat] = useState<number | null>(null);
   const [projectId, setProjectId] = useState<number | null>(null);
+  const [logoTaps, setLogoTaps] = useState(0);
   const [profileId, setProfileId] = useState<number | null>(null);
   const [fullChat, setFullChat] = useState(false);
-  const { logout } = useAuth();
+  const { logout, refresh } = useAuth();
   const projectDetail = trpc.projects.get.useQuery(
     { id: projectId || 0 },
     { enabled: Boolean(projectId), retry: false }
@@ -3116,7 +3175,22 @@ function AppShell({ user }: { user: any }) {
       {!fullChat && (
         <header className="z-20 shrink-0 border-b bg-background/85 backdrop-blur-xl">
           <div className="container flex h-16 items-center justify-between">
-            <Brand />
+            <button
+              type="button"
+              aria-label="Gridora logo"
+              onClick={() => {
+                const next = advanceAdminShortcutTap(logoTaps);
+                setLogoTaps(next.tapCount);
+                if (next.openAdmin) {
+                  void refresh().then(session => {
+                    if (isGridoraPrimaryAdmin(session.data))
+                      window.location.href = "/admin";
+                  });
+                }
+              }}
+            >
+              <Brand />
+            </button>
             <div className="flex items-center gap-2">
               <span className="hidden rounded-full bg-secondary px-3 py-1 text-xs font-bold text-secondary-foreground sm:inline">
                 {user.accountType === "designer" ? "Designer" : "Client"}
@@ -3171,7 +3245,9 @@ function AppShell({ user }: { user: any }) {
         )}
         {!fullChat && <PublicFooter />}
       </main>
-      {tab === "chat" && !fullChat && <GridoraAiWidget />}
+      {tab === "chat" && (
+        <GridoraAiWidget immersive={fullChat} onImmersiveChange={setFullChat} />
+      )}
       {!fullChat && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 shrink-0 border-t bg-card/95 px-2 py-2 pb-[calc(.5rem+env(safe-area-inset-bottom))] backdrop-blur-xl lg:static lg:mx-auto lg:mt-6 lg:flex lg:max-w-xl lg:rounded-2xl lg:border lg:px-3 lg:shadow-lg">
           <div className="container flex max-w-xl items-center justify-around p-0">

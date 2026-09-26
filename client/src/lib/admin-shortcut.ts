@@ -1,4 +1,4 @@
-export const ADMIN_SHORTCUT_TAPS = 29;
+export const ADMIN_SHORTCUT_TAPS = 10;
 
 export function advanceAdminShortcutTap(currentTapCount: number) {
   const nextCount = Math.max(0, Math.floor(currentTapCount)) + 1;

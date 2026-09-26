@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
+import { isGridoraPrimaryAdmin } from "@shared/admin-access";
 import { useAuth } from "@/_core/hooks/useAuth";
 import {
   ArrowLeft,
@@ -44,8 +45,8 @@ function LockedAdmin({ onUnlocked }: { onUnlocked: () => void }) {
           Admin password
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Enter the primary administrator password to open the dashboard. Direct
-          links do not bypass this check.
+          Enter the administrator verification password to open the dashboard.
+          The signed-in primary owner enters directly.
         </p>
         <Input
           autoFocus
@@ -88,7 +89,10 @@ function Dashboard() {
   const [search, setSearch] = useState("");
   const [directorySearch, setDirectorySearch] = useState("");
   const [directoryOffset, setDirectoryOffset] = useState(0);
+  const [statusOffset, setStatusOffset] = useState(0);
   const [moderationReason, setModerationReason] = useState("");
+  const [aiTargetUserId, setAiTargetUserId] = useState("");
+  const [statusDrafts, setStatusDrafts] = useState<Record<number, string>>({});
   const stats = trpc.admin.stats.useQuery();
   const users = trpc.admin.users.useQuery({ search });
   const directory = trpc.admin.userDirectory.useQuery({
@@ -97,6 +101,19 @@ function Dashboard() {
     limit: 25,
   });
   const reports = trpc.admin.reports.useQuery();
+  const statusDirectory = trpc.admin.statusDirectory.useQuery({
+    offset: statusOffset,
+    limit: 25,
+  });
+  const selectedAiUserId = Number(aiTargetUserId) || 0;
+  const aiMemoryStatus = trpc.admin.aiMemoryStatus.useQuery(
+    { userId: selectedAiUserId },
+    { enabled: selectedAiUserId > 0 }
+  );
+  const aiThreads = trpc.admin.aiThreads.useQuery(
+    { userId: selectedAiUserId },
+    { enabled: selectedAiUserId > 0 }
+  );
   const challenges = trpc.admin.challenges.useQuery();
   const admins = trpc.admin.listAdmins.useQuery();
   const [challenge, setChallenge] = useState({
@@ -121,7 +138,7 @@ function Dashboard() {
     onSuccess: result => {
       toast.success(
         result.status === "deleted"
-          ? "Account marked deleted; user data retained"
+          ? "Sign-in disabled; account data is retained"
           : result.status === "suspended"
             ? "Account suspended and sessions revoked"
             : "Account access restored"
@@ -130,6 +147,49 @@ function Dashboard() {
       users.refetch();
       stats.refetch();
       reports.refetch();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const eraseAccount = trpc.admin.deleteAccount.useMutation({
+    onSuccess: () => {
+      toast.success("Account and linked Gridora data were permanently erased");
+      setAiTargetUserId("");
+      void directory.refetch();
+      void users.refetch();
+      void stats.refetch();
+      void reports.refetch();
+      void statusDirectory.refetch();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const editStatus = trpc.admin.editStatus.useMutation({
+    onSuccess: () => {
+      toast.success("Status updated");
+      void statusDirectory.refetch();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const deleteStatus = trpc.admin.deleteStatus.useMutation({
+    onSuccess: () => {
+      toast.success("Status deleted");
+      if (statusDirectory.data?.rows.length === 1 && statusOffset > 0)
+        setStatusOffset(offset => Math.max(0, offset - 25));
+      else void statusDirectory.refetch();
+      void stats.refetch();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const deleteAiMemory = trpc.admin.deleteAiMemory.useMutation({
+    onSuccess: () => {
+      toast.success("User's Gridora AI design notes were deleted");
+      void aiMemoryStatus.refetch();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const deleteAiThread = trpc.admin.deleteAiThread.useMutation({
+    onSuccess: () => {
+      toast.success("Gridora AI conversation deleted");
+      void aiThreads.refetch();
     },
     onError: error => toast.error(error.message),
   });
@@ -320,6 +380,7 @@ function Dashboard() {
               {directory.data.rows.map(account => {
                 const isSelf = account.id === currentUser?.id;
                 const isAdmin = account.role === "admin";
+                const isPrimaryAdmin = isGridoraPrimaryAdmin(account);
                 const statusPending = accountStatus.isPending;
                 return (
                   <div
@@ -417,9 +478,29 @@ function Dashboard() {
                               });
                           }}
                         >
-                          <Trash2 size={14} /> Delete account
+                          <Trash2 size={14} /> Disable sign-in
                         </Button>
                       )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="rounded-xl text-destructive"
+                        disabled={eraseAccount.isPending || isSelf || isPrimaryAdmin}
+                        title={
+                          isPrimaryAdmin
+                            ? "The primary administrator account is protected"
+                            : "Permanently erase this account and its linked data"
+                        }
+                        onClick={() => {
+                          const confirmation = window.prompt(
+                            `Permanently erase ${account.name || `account #${account.id}`} and its account/profile, posts, comments and likes, sent messages, statuses and reactions, portfolio/availability, requests/reviews/connections/blocks, notifications, submitted reports, AI notes and conversations, challenge submissions, and challenges created by this account. Stored upload objects are not physically purged by the current storage service. This cannot be undone. Type DELETE to confirm.`
+                          );
+                          if (confirmation === "DELETE")
+                            eraseAccount.mutate({ userId: account.id });
+                        }}
+                      >
+                        <Trash2 size={14} /> Erase data permanently
+                      </Button>
                     </div>
                   </div>
                 );
@@ -462,6 +543,214 @@ function Dashboard() {
               </Button>
             </div>
           </div>
+        </section>
+        <section className="mt-6 rounded-3xl border bg-card p-5">
+          <div className="mb-4">
+            <h2 className="font-[Manrope] text-xl font-extrabold">
+              Status moderation
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Edit or remove status posts. User-owned statuses still expire
+              automatically after 24 hours.
+            </p>
+          </div>
+          {statusDirectory.isLoading ? (
+            <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">
+              Loading status posts…
+            </p>
+          ) : statusDirectory.error ? (
+            <p role="alert" className="rounded-xl bg-destructive/10 p-4 text-sm text-destructive">
+              Could not load status posts. Refresh and try again.
+            </p>
+          ) : statusDirectory.data?.rows.length ? (
+            <div className="space-y-3">
+              {statusDirectory.data.rows.map(({ status, author }) => {
+                const body = statusDrafts[status.id] ?? status.body;
+                const changed = body !== status.body;
+                return (
+                  <div key={status.id} className="rounded-2xl border p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <span className="font-semibold text-foreground">
+                        {author.name || `User #${author.id}`} · @{author.username || "no-username"}
+                      </span>
+                      <span>
+                        {new Date(status.createdAt).toLocaleString()} · expires {new Date(status.expiresAt).toLocaleString()}
+                      </span>
+                    </div>
+                    {status.imageUrl && (
+                      <img
+                        src={status.imageUrl}
+                        alt="Status attachment"
+                        className="mb-3 max-h-48 rounded-xl object-contain"
+                      />
+                    )}
+                    <Textarea
+                      value={body}
+                      maxLength={1000}
+                      onChange={event =>
+                        setStatusDrafts(current => ({
+                          ...current,
+                          [status.id]: event.target.value,
+                        }))
+                      }
+                      aria-label={`Edit status ${status.id}`}
+                      className="min-h-16"
+                    />
+                    <div className="mt-2 flex flex-wrap justify-end gap-2">
+                      <Button
+                        size="sm"
+                        className="rounded-xl"
+                        disabled={!changed || editStatus.isPending}
+                        onClick={() => editStatus.mutate({ statusId: status.id, body })}
+                      >
+                        Save edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="rounded-xl text-destructive"
+                        disabled={deleteStatus.isPending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Permanently delete this status by ${author.name || `user #${author.id}`}?`
+                            )
+                          )
+                            deleteStatus.mutate({ statusId: status.id });
+                        }}
+                      >
+                        <Trash2 size={14} /> Delete status
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 text-xs text-muted-foreground">
+                <span>
+                  {statusDirectory.data.total
+                    ? `${statusOffset + 1}–${Math.min(statusOffset + 25, statusDirectory.data.total)} of ${statusDirectory.data.total}`
+                    : "0 statuses"}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="rounded-xl"
+                    disabled={statusOffset === 0 || statusDirectory.isFetching}
+                    onClick={() => setStatusOffset(offset => Math.max(0, offset - 25))}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="rounded-xl"
+                    disabled={
+                      statusOffset + 25 >= statusDirectory.data.total ||
+                      statusDirectory.isFetching
+                    }
+                    onClick={() => setStatusOffset(offset => offset + 25)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">
+              No status posts to moderate.
+            </p>
+          )}
+        </section>
+        <section className="mt-6 rounded-3xl border bg-card p-5">
+          <div className="mb-4">
+            <h2 className="font-[Manrope] text-xl font-extrabold">
+              Gridora AI data controls
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Delete a user's saved design notes or individual conversations.
+              Conversation messages are not displayed here.
+            </p>
+          </div>
+          <label className="block max-w-xl text-xs font-bold text-muted-foreground" htmlFor="ai-data-account">
+            Select an account
+          </label>
+          <select
+            id="ai-data-account"
+            className="mt-1 h-10 w-full max-w-xl rounded-xl border bg-background px-3 text-sm"
+            value={aiTargetUserId}
+            onChange={event => setAiTargetUserId(event.target.value)}
+          >
+            <option value="">Choose an account</option>
+            {directory.data?.rows.map(account => (
+              <option key={account.id} value={String(account.id)}>
+                {account.name || `Account #${account.id}`} · {account.email || account.username || "no contact"}
+              </option>
+            ))}
+          </select>
+          {selectedAiUserId > 0 && (
+            <div className="mt-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border p-3">
+                <span className="text-sm font-semibold">
+                  Saved design notes: {aiMemoryStatus.isLoading ? "Checking…" : aiMemoryStatus.data?.hasNotes ? "present" : "none"}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-xl text-destructive"
+                  disabled={!aiMemoryStatus.data?.hasNotes || deleteAiMemory.isPending}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Permanently delete this user's saved Gridora AI design notes?"
+                      )
+                    )
+                      deleteAiMemory.mutate({ userId: selectedAiUserId });
+                  }}
+                >
+                  <Trash2 size={14} /> Delete notes
+                </Button>
+              </div>
+              {aiThreads.isLoading ? (
+                <p className="text-sm text-muted-foreground">Loading conversation list…</p>
+              ) : aiThreads.error ? (
+                <p role="alert" className="text-sm text-destructive">Could not load this account's conversations.</p>
+              ) : aiThreads.data?.length ? (
+                <div className="space-y-2">
+                  {aiThreads.data.map(thread => (
+                    <div key={thread.id} className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border p-3">
+                      <span className="text-sm">
+                        Conversation #{thread.id} · updated {new Date(thread.updatedAt).toLocaleString()}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="rounded-xl text-destructive"
+                        disabled={deleteAiThread.isPending}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Permanently delete Gridora AI conversation #${thread.id} and its messages?`
+                            )
+                          )
+                            deleteAiThread.mutate({
+                              userId: selectedAiUserId,
+                              threadId: thread.id,
+                            });
+                        }}
+                      >
+                        <Trash2 size={14} /> Delete conversation
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">
+                  This account has no saved Gridora AI conversations.
+                </p>
+              )}
+            </div>
+          )}
         </section>
         <section className="mt-6 rounded-3xl border bg-card p-5">
           <div className="mb-4">
@@ -1048,8 +1337,8 @@ function Dashboard() {
               Admin access control
             </h2>
             <p className="text-sm text-muted-foreground">
-              The control room is password-gated. Manage delegated administrator
-              roles here.
+              The signed-in primary owner enters directly. Manage delegated
+              administrator roles here.
             </p>
           </div>
           <div className="space-y-3">
@@ -1074,6 +1363,12 @@ function Dashboard() {
                     size="sm"
                     variant="outline"
                     className="rounded-xl text-destructive"
+                    disabled={entry.admin.isPrimary || revokeAdmin.isPending}
+                    title={
+                      entry.admin.isPrimary
+                        ? "The primary administrator role is protected"
+                        : "Revoke delegated administrator access"
+                    }
                     onClick={() =>
                       revokeAdmin.mutate({ userId: entry.user.id })
                     }
@@ -1155,8 +1450,8 @@ export default function Admin() {
             Admin account required
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            This route is protected by the account role and then requires a
-            password password verification.
+            This route requires an administrator account. Contact the Gridora
+            primary administrator if you need access.
           </p>
           <Button
             className="mt-5 rounded-xl"
@@ -1169,7 +1464,7 @@ export default function Admin() {
         </div>
       </div>
     );
-  return unlocked ? (
+  return unlocked || isGridoraPrimaryAdmin(user) ? (
     <Dashboard />
   ) : (
     <LockedAdmin onUnlocked={() => setUnlocked(true)} />

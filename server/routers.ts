@@ -38,6 +38,9 @@ import {
   connectionRequests,
   messages,
   notifications,
+  gridoraAiMessages,
+  gridoraAiProfiles,
+  gridoraAiThreads,
   siteContent,
   portfolioProjects,
   postLikes,
@@ -52,7 +55,9 @@ import {
   users,
   userBlocks,
 } from "../drizzle/schema";
+import { isGridoraPrimaryAdmin } from "../shared/admin-access";
 import { getDb, getUnreadNotifications, getUserById } from "./db";
+import { eraseGridoraAccountData } from "./adminUserData";
 import { storagePut } from "./storage";
 import { gridoraAIRouter } from "./gridoraAIRouter";
 import { isFirstRegisteredAccount } from "./gridoraAI";
@@ -178,6 +183,10 @@ const requestOrigin = (req: any) =>
 const adminSession = async (ctx: any) => {
   const admin = requireAdmin(ctx.user);
   const db = await getDb();
+  if (isGridoraPrimaryAdmin(admin)) {
+    if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+    return { db, admin };
+  }
   const sid = readCookie(ctx.req, "gridora_admin_session");
   if (!db || !sid)
     throw new TRPCError({
@@ -2107,7 +2116,9 @@ export const appRouter = router({
         : undefined;
       return {
         hasCredential: Boolean(row?.credentialId && row.publicKey),
-        unlocked: Boolean(session && session.expiresAt > new Date()),
+        unlocked:
+          isGridoraPrimaryAdmin(admin) ||
+          Boolean(session && session.expiresAt > new Date()),
         hasRecovery: Boolean(row?.recoveryHash),
       };
     }),
@@ -2462,6 +2473,18 @@ export const appRouter = router({
           throw new TRPCError({
             code: "BAD_REQUEST",
             message: "You cannot revoke your own primary access",
+          });
+        const target = (
+          await db
+            .select()
+            .from(users)
+            .where(eq(users.id, input.userId))
+            .limit(1)
+        )[0];
+        if (target && isGridoraPrimaryAdmin(target))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "The primary administrator role cannot be revoked",
           });
         await db
           .update(users)
@@ -2841,6 +2864,11 @@ export const appRouter = router({
         )[0];
         if (!target)
           throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+        if (isGridoraPrimaryAdmin(target))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "The primary administrator account cannot be suspended or deleted",
+          });
         await db
           .update(users)
           .set({
@@ -2860,6 +2888,192 @@ export const appRouter = router({
           ]);
         }
         return { success: true, status: input.status };
+      }),
+    deleteAccount: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { db, admin } = await adminSession(ctx);
+        const target = (
+          await db
+            .select()
+            .from(users)
+            .where(eq(users.id, input.userId))
+            .limit(1)
+        )[0];
+        if (!target)
+          throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+        if (target.id === admin.id || isGridoraPrimaryAdmin(target))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "The active or primary administrator account cannot be erased",
+          });
+        if (target.role === "admin")
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Revoke this delegated administrator role before erasing the account",
+          });
+        await db.transaction(async tx =>
+          eraseGridoraAccountData(tx, target.id, admin.id)
+        );
+        return { success: true };
+      }),
+    statusDirectory: protectedProcedure
+      .input(
+        z.object({
+          offset: z.number().int().min(0).max(1_000_000),
+          limit: z.number().int().min(1).max(50),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+      const { db } = await adminSession(ctx);
+      const [rows, total] = await Promise.all([
+        db
+          .select({
+            status: statuses,
+            author: {
+              id: users.id,
+              name: users.name,
+              username: users.username,
+            },
+          })
+          .from(statuses)
+          .innerJoin(users, eq(statuses.userId, users.id))
+          .orderBy(desc(statuses.createdAt))
+          .limit(input.limit)
+          .offset(input.offset),
+        db.select({ count: sql<number>`count(*)` }).from(statuses),
+      ]);
+      return {
+        rows,
+        total: Number(total[0]?.count || 0),
+        offset: input.offset,
+        limit: input.limit,
+      };
+    }),
+    editStatus: protectedProcedure
+      .input(
+        z.object({
+          statusId: z.number().int().positive(),
+          body: z.string().trim().max(1000),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        const status = (
+          await db
+            .select({ id: statuses.id })
+            .from(statuses)
+            .where(eq(statuses.id, input.statusId))
+            .limit(1)
+        )[0];
+        if (!status)
+          throw new TRPCError({ code: "NOT_FOUND", message: "Status not found" });
+        await db
+          .update(statuses)
+          .set({ body: input.body })
+          .where(eq(statuses.id, input.statusId));
+        return { success: true };
+      }),
+    deleteStatus: protectedProcedure
+      .input(z.object({ statusId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        await db.transaction(async tx => {
+          const status = (
+            await tx
+              .select({ id: statuses.id })
+              .from(statuses)
+              .where(eq(statuses.id, input.statusId))
+              .limit(1)
+          )[0];
+          if (!status)
+            throw new TRPCError({ code: "NOT_FOUND", message: "Status not found" });
+          await tx
+            .delete(statusLikes)
+            .where(eq(statusLikes.statusId, input.statusId));
+          await tx
+            .delete(statusViews)
+            .where(eq(statusViews.statusId, input.statusId));
+          await tx.delete(statuses).where(eq(statuses.id, input.statusId));
+        });
+        return { success: true };
+      }),
+    aiMemoryStatus: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        const memory = (
+          await db
+            .select({ designMemory: gridoraAiProfiles.designMemory })
+            .from(gridoraAiProfiles)
+            .where(eq(gridoraAiProfiles.userId, input.userId))
+            .limit(1)
+        )[0];
+        return { hasNotes: Boolean(memory?.designMemory?.trim()) };
+      }),
+    aiThreads: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        return db
+          .select({
+            id: gridoraAiThreads.id,
+            updatedAt: gridoraAiThreads.updatedAt,
+          })
+          .from(gridoraAiThreads)
+          .where(eq(gridoraAiThreads.userId, input.userId))
+          .orderBy(desc(gridoraAiThreads.updatedAt))
+          .limit(50);
+      }),
+    deleteAiMemory: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        await db
+          .delete(gridoraAiProfiles)
+          .where(eq(gridoraAiProfiles.userId, input.userId));
+        return { success: true };
+      }),
+    deleteAiThread: protectedProcedure
+      .input(
+        z.object({
+          userId: z.number().int().positive(),
+          threadId: z.number().int().positive(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        const thread = (
+          await db
+            .select({ id: gridoraAiThreads.id })
+            .from(gridoraAiThreads)
+            .where(
+              and(
+                eq(gridoraAiThreads.id, input.threadId),
+                eq(gridoraAiThreads.userId, input.userId)
+              )
+            )
+            .limit(1)
+        )[0];
+        if (!thread)
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Gridora AI conversation not found",
+          });
+        await db.transaction(async tx => {
+          await tx
+            .delete(gridoraAiMessages)
+            .where(eq(gridoraAiMessages.threadId, thread.id));
+          await tx
+            .delete(gridoraAiThreads)
+            .where(
+              and(
+                eq(gridoraAiThreads.id, thread.id),
+                eq(gridoraAiThreads.userId, input.userId)
+              )
+            );
+        });
+        return { success: true };
       }),
     reports: protectedProcedure.query(async ({ ctx }) => {
       const { db } = await adminSession(ctx);

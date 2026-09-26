@@ -84,6 +84,24 @@ describe("Gridora public procedures", () => {
     await expect(caller.admin.users({ search: "" })).rejects.toMatchObject({
       code: "FORBIDDEN",
     });
+    await expect(caller.admin.deleteAccount({ userId: 42 })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    await expect(
+      caller.admin.statusDirectory({ offset: 0, limit: 25 })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      caller.admin.editStatus({ statusId: 1, body: "moderated text" })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      caller.admin.deleteStatus({ statusId: 1 })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      caller.admin.deleteAiMemory({ userId: 42 })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      caller.admin.deleteAiThread({ userId: 42, threadId: 1 })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
   it("returns a signed-out state instead of invoking external OAuth", async () => {
@@ -94,6 +112,12 @@ describe("Gridora public procedures", () => {
     });
     await expect(
       caller.gridoraAI.saveMemory({ designMemory: "Use warm colors" })
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(caller.gridoraAI.deleteMemory()).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    await expect(
+      caller.gridoraAI.deleteThread({ threadId: 1 })
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 
