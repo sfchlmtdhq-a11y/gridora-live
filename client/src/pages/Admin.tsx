@@ -6,11 +6,13 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import {
   ArrowLeft,
   BarChart3,
+  Ban,
   Check,
   Flag,
   Loader2,
   LockKeyhole,
   Plus,
+  Search,
   ShieldCheck,
   Trash2,
   UserRound,
@@ -84,8 +86,16 @@ function LockedAdmin({ onUnlocked }: { onUnlocked: () => void }) {
 function Dashboard() {
   const { user: currentUser } = useAuth();
   const [search, setSearch] = useState("");
+  const [directorySearch, setDirectorySearch] = useState("");
+  const [directoryOffset, setDirectoryOffset] = useState(0);
+  const [moderationReason, setModerationReason] = useState("");
   const stats = trpc.admin.stats.useQuery();
   const users = trpc.admin.users.useQuery({ search });
+  const directory = trpc.admin.userDirectory.useQuery({
+    search: directorySearch,
+    offset: directoryOffset,
+    limit: 25,
+  });
   const reports = trpc.admin.reports.useQuery();
   const challenges = trpc.admin.challenges.useQuery();
   const admins = trpc.admin.listAdmins.useQuery();
@@ -106,6 +116,22 @@ function Dashboard() {
   const resolve = trpc.admin.resolveReport.useMutation({
     onSuccess: () => reports.refetch(),
     onError: e => toast.error(e.message),
+  });
+  const accountStatus = trpc.admin.setAccountStatus.useMutation({
+    onSuccess: result => {
+      toast.success(
+        result.status === "deleted"
+          ? "Account marked deleted; user data retained"
+          : result.status === "suspended"
+            ? "Account suspended and sessions revoked"
+            : "Account access restored"
+      );
+      directory.refetch();
+      users.refetch();
+      stats.refetch();
+      reports.refetch();
+    },
+    onError: error => toast.error(error.message),
   });
   const approveChallenge = trpc.admin.approveChallenge.useMutation({
     onSuccess: () => {
@@ -234,6 +260,210 @@ function Dashboard() {
           ))}
         </div>
         <section className="mt-6 rounded-3xl border bg-card p-5">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="font-[Manrope] text-xl font-extrabold">
+                All user accounts
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                {directory.data?.total ?? "—"} accounts · account data is
+                retained if access is disabled
+              </p>
+            </div>
+            <div className="relative w-full sm:max-w-sm">
+              <Search
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+              />
+              <Input
+                className="pl-9"
+                value={directorySearch}
+                onChange={event => {
+                  setDirectorySearch(event.target.value);
+                  setDirectoryOffset(0);
+                }}
+                placeholder="Search name, username, phone, or email"
+                aria-label="Search all accounts"
+              />
+            </div>
+          </div>
+          <div className="mb-4 max-w-xl">
+            <label
+              className="mb-1 block text-xs font-semibold text-muted-foreground"
+              htmlFor="moderation-note"
+            >
+              Optional reason for the next moderation action
+            </label>
+            <Input
+              id="moderation-note"
+              value={moderationReason}
+              onChange={event =>
+                setModerationReason(event.target.value.slice(0, 500))
+              }
+              placeholder="Internal moderation note"
+              maxLength={500}
+            />
+          </div>
+          {directory.isLoading ? (
+            <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">
+              Loading all user accounts…
+            </p>
+          ) : directory.error ? (
+            <p
+              role="alert"
+              className="rounded-xl bg-destructive/10 p-4 text-sm text-destructive"
+            >
+              Could not load the user directory. Refresh and try again.
+            </p>
+          ) : directory.data?.rows.length ? (
+            <div className="space-y-2">
+              {directory.data.rows.map(account => {
+                const isSelf = account.id === currentUser?.id;
+                const isAdmin = account.role === "admin";
+                const statusPending = accountStatus.isPending;
+                return (
+                  <div
+                    key={account.id}
+                    className="flex flex-col gap-3 rounded-2xl border p-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-bold">
+                          {account.name || "Unnamed account"}
+                        </p>
+                        <span className="text-sm text-muted-foreground">
+                          @{account.username || "no-username"}
+                        </span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${account.moderationStatus === "active" ? "bg-emerald-500/10 text-emerald-600" : account.moderationStatus === "suspended" ? "bg-amber-500/10 text-amber-600" : "bg-destructive/10 text-destructive"}`}
+                        >
+                          {account.moderationStatus}
+                        </span>
+                        {isAdmin && (
+                          <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-bold uppercase text-secondary-foreground">
+                            Admin
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1 truncate text-xs text-muted-foreground">
+                        {account.email || account.phone || "No contact details"}{" "}
+                        · {account.accountType} · joined{" "}
+                        {new Date(account.createdAt).toLocaleDateString()}
+                      </p>
+                      {account.moderationReason &&
+                        account.moderationStatus !== "active" && (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Moderation reason: {account.moderationReason}
+                          </p>
+                        )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {account.moderationStatus !== "active" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="rounded-xl"
+                          disabled={statusPending || isSelf}
+                          onClick={() =>
+                            accountStatus.mutate({
+                              userId: account.id,
+                              status: "active",
+                            })
+                          }
+                        >
+                          Restore access
+                        </Button>
+                      )}
+                      {account.moderationStatus === "active" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="rounded-xl"
+                          disabled={statusPending || isSelf}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Suspend ${account.name || `account #${account.id}`} and revoke active sessions? An admin can restore access later.`
+                              )
+                            )
+                              accountStatus.mutate({
+                                userId: account.id,
+                                status: "suspended",
+                                reason: moderationReason,
+                              });
+                          }}
+                        >
+                          <Ban size={14} /> Suspend
+                        </Button>
+                      )}
+                      {account.moderationStatus !== "deleted" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="rounded-xl text-destructive"
+                          disabled={statusPending || isSelf}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Mark ${account.name || `account #${account.id}`} as deleted? Their sign-in will be disabled and active sessions revoked. Existing account data is retained and an admin can restore access.`
+                              )
+                            )
+                              accountStatus.mutate({
+                                userId: account.id,
+                                status: "deleted",
+                                reason:
+                                  moderationReason ||
+                                  "Deleted by administrator",
+                              });
+                          }}
+                        >
+                          <Trash2 size={14} /> Delete account
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="rounded-xl bg-muted p-4 text-sm text-muted-foreground">
+              No accounts match this search.
+            </p>
+          )}
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <span className="text-xs text-muted-foreground">
+              {directory.data?.total
+                ? `${directoryOffset + 1}–${Math.min(directoryOffset + 25, directory.data.total)} of ${directory.data.total}`
+                : "0 accounts"}
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-xl"
+                disabled={directoryOffset === 0 || directory.isFetching}
+                onClick={() =>
+                  setDirectoryOffset(offset => Math.max(0, offset - 25))
+                }
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-xl"
+                disabled={
+                  directoryOffset + 25 >= (directory.data?.total ?? 0) ||
+                  directory.isFetching
+                }
+                onClick={() => setDirectoryOffset(offset => offset + 25)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        </section>
+        <section className="mt-6 rounded-3xl border bg-card p-5">
           <div className="mb-4">
             <h2 className="font-[Manrope] text-xl font-extrabold">
               Website content
@@ -261,6 +491,34 @@ function Dashboard() {
                 className="mt-1"
               />
             </div>
+            {[
+              [
+                "home.kicker",
+                "Homepage eyebrow",
+                "Built for people who make things",
+              ],
+              ["home.titleStart", "Hero title — first part", "Your next"],
+              [
+                "home.titleAccent",
+                "Hero title — accent part",
+                "creative connection",
+              ],
+              ["home.titleEnd", "Hero title — final part", "starts here."],
+            ].map(([key, label, fallback]) => (
+              <div key={key}>
+                <label className="text-xs font-bold text-muted-foreground">
+                  {label}
+                </label>
+                <Input
+                  value={getContent(key, fallback)}
+                  onChange={e =>
+                    setContentDraft({ ...contentDraft, [key]: e.target.value })
+                  }
+                  className="mt-1"
+                  maxLength={160}
+                />
+              </div>
+            ))}
             <div>
               <label className="text-xs font-bold text-muted-foreground">
                 About content
@@ -315,6 +573,67 @@ function Dashboard() {
                 className="mt-1"
               />
             </div>
+            <div>
+              <label className="text-xs font-bold text-muted-foreground">
+                Cookie policy
+              </label>
+              <Textarea
+                value={getContent(
+                  "legal.cookies",
+                  "Gridora uses necessary session cookies for authentication and secure access, plus local preferences for the application experience."
+                )}
+                onChange={e =>
+                  setContentDraft({
+                    ...contentDraft,
+                    "legal.cookies": e.target.value,
+                  })
+                }
+                className="mt-1"
+              />
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <label className="text-xs font-bold text-muted-foreground">
+                Footer credit
+              </label>
+              <Input
+                value={getContent(
+                  "footer.credit",
+                  "Powered by SFCH Limited in Cooperation with Trendythread"
+                )}
+                onChange={e =>
+                  setContentDraft({
+                    ...contentDraft,
+                    "footer.credit": e.target.value,
+                  })
+                }
+                className="mt-1"
+                maxLength={200}
+              />
+            </div>
+            {[
+              ["social.instagram", "Instagram URL"],
+              ["social.facebook", "Facebook URL"],
+              ["social.linkedin", "LinkedIn URL"],
+              ["social.tiktok", "TikTok URL"],
+              ["social.youtube", "YouTube URL"],
+            ].map(([key, label]) => (
+              <div key={key}>
+                <label className="text-xs font-bold text-muted-foreground">
+                  {label}
+                </label>
+                <Input
+                  value={getContent(key, "")}
+                  onChange={e =>
+                    setContentDraft({ ...contentDraft, [key]: e.target.value })
+                  }
+                  className="mt-1"
+                  type="url"
+                  placeholder="https://…"
+                />
+              </div>
+            ))}
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <label className="flex cursor-pointer items-center gap-2 rounded-xl border bg-muted px-3 py-2 text-sm font-semibold">
@@ -572,6 +891,19 @@ function Dashboard() {
                         <p className="mt-1 text-sm text-muted-foreground">
                           {report.reason}
                         </p>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          Reported by{" "}
+                          {report.reporter?.name ||
+                            `user #${report.reporterId}`}
+                          {report.reporter?.username
+                            ? ` (@${report.reporter.username})`
+                            : ""}
+                        </p>
+                        {report.reporterBlockedTarget && (
+                          <span className="mt-2 inline-flex rounded-full bg-secondary px-2 py-1 text-[10px] font-bold text-secondary-foreground">
+                            Reporter has blocked this user
+                          </span>
+                        )}
                         <p className="mt-1 text-[11px] font-bold uppercase tracking-wide text-primary">
                           {report.status}
                         </p>

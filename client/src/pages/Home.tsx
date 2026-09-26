@@ -3,13 +3,21 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useTheme } from "@/contexts/ThemeContext";
 import { trpc } from "@/lib/trpc";
-import { getAuthErrorMessage, validateAuthForm } from "@/lib/auth-ui";
+import { Streamdown } from "streamdown";
+import {
+  getAuthErrorMessage,
+  getAuthFieldFeedback,
+  validateAuthForm,
+  type AuthField,
+} from "@/lib/auth-ui";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { toast } from "sonner";
 import {
   Bell,
   BriefcaseBusiness,
   Check,
+  Eye,
+  EyeOff,
   ChevronLeft,
   ChevronRight,
   CircleUserRound,
@@ -18,6 +26,7 @@ import {
   FileImage,
   Hash,
   Heart,
+  ImagePlus,
   Info,
   Loader2,
   LogOut,
@@ -184,8 +193,62 @@ function PasswordEligibility({
     </div>
   );
 }
+function PublicFooter() {
+  const settings = trpc.content.publicSettings.useQuery(undefined, {
+    staleTime: 30_000,
+  });
+  const content = settings.data ?? {};
+  const links = [
+    ["Instagram", content["social.instagram"]],
+    ["Facebook", content["social.facebook"]],
+    ["LinkedIn", content["social.linkedin"]],
+    ["TikTok", content["social.tiktok"]],
+    ["YouTube", content["social.youtube"]],
+  ].filter((entry): entry is [string, string] => {
+    if (!entry[1]) return false;
+    try {
+      return new URL(entry[1]).protocol === "https:";
+    } catch {
+      return false;
+    }
+  });
+  return (
+    <footer className="w-full border-t border-border/60 bg-background/80 px-4 py-4 text-center text-xs text-muted-foreground">
+      <p>
+        {content["footer.credit"] ||
+          "Powered by SFCH Limited in Cooperation with Trendythread"}
+      </p>
+      {links.length > 0 && (
+        <nav
+          className="mt-2 flex flex-wrap justify-center gap-x-4 gap-y-2"
+          aria-label="Gridora social media"
+        >
+          {links.map(([label, href]) => (
+            <a
+              key={label}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-primary underline-offset-4 hover:underline"
+            >
+              {label}
+            </a>
+          ))}
+        </nav>
+      )}
+    </footer>
+  );
+}
 function AuthPanel({ onDone }: { onDone: () => void }) {
+  const publicCopy = trpc.content.publicSettings.useQuery(undefined, {
+    staleTime: 30_000,
+  });
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [touched, setTouched] = useState<Partial<Record<AuthField, boolean>>>(
+    {}
+  );
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmation, setShowConfirmation] = useState(false);
   const [authStatus, setAuthStatus] = useState<{
     kind: "pending" | "success" | "error";
     text: string;
@@ -227,11 +290,43 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
     },
     onError: e => showAuthError(getAuthErrorMessage("register", e.message)),
   });
-  const update = (key: keyof typeof form, value: string) =>
+  const update = (key: keyof typeof form, value: string) => {
     setForm(v => ({ ...v, [key]: value }));
+    if (
+      ["name", "username", "phone", "email", "password", "confirm"].includes(
+        key
+      )
+    )
+      setTouched(v => ({ ...v, [key]: true }));
+  };
+  const feedbackFor = (field: AuthField) =>
+    getAuthFieldFeedback(mode, field, form, Boolean(touched[field]));
+  const renderFeedback = (field: AuthField) => {
+    const feedback = feedbackFor(field);
+    if (!feedback) return null;
+    return (
+      <p
+        id={`auth-${field}-feedback`}
+        className={`mt-1 flex items-center gap-1 text-xs ${feedback.status === "invalid" ? "text-destructive" : "text-emerald-500"}`}
+        role="status"
+        aria-live="polite"
+      >
+        {feedback.status === "valid" ? <Check size={13} /> : <Info size={13} />}
+        {feedback.message}
+      </p>
+    );
+  };
   const submit = (e: FormEvent) => {
     e.preventDefault();
     setAuthStatus(null);
+    setTouched({
+      name: mode === "register",
+      username: mode === "register",
+      phone: true,
+      email: mode === "register" && Boolean(form.email),
+      password: true,
+      confirm: mode === "register",
+    });
     if (mode === "login") {
       const validationError = validateAuthForm("login", form);
       if (validationError) return showAuthError(validationError);
@@ -264,16 +359,20 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
           <Brand />
           <div className="mt-10 space-y-5">
             <div className="inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs font-bold text-secondary-foreground">
-              <Sparkles size={14} /> Built for people who make things
+              <Sparkles size={14} />
+              {publicCopy.data?.["home.kicker"] ||
+                "Built for people who make things"}
             </div>
             <h1 className="font-[Manrope] text-4xl font-extrabold leading-[1.05] tracking-tight sm:text-6xl">
-              Your next{" "}
-              <span className="text-primary">creative connection</span> starts
-              here.
+              {publicCopy.data?.["home.titleStart"] || "Your next"}{" "}
+              <span className="text-primary">
+                {publicCopy.data?.["home.titleAccent"] || "creative connection"}
+              </span>{" "}
+              {publicCopy.data?.["home.titleEnd"] || "starts here."}
             </h1>
             <p className="max-w-md text-base leading-7 text-muted-foreground">
-              Discover brilliant designers, build meaningful working
-              relationships, and bring ambitious ideas to life.
+              {publicCopy.data?.["home.tagline"] ||
+                "Discover brilliant designers, build meaningful working relationships, and bring ambitious ideas to life."}
             </p>
             <div className="flex flex-wrap gap-3 text-sm font-semibold">
               <span className="flex items-center gap-2">
@@ -299,6 +398,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
               onClick={() => {
                 setMode("login");
                 setAuthStatus(null);
+                setTouched({});
               }}
             >
               Log in
@@ -311,6 +411,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
               onClick={() => {
                 setMode("register");
                 setAuthStatus(null);
+                setTouched({});
               }}
             >
               Create account
@@ -324,25 +425,41 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
           >
             {mode === "register" && (
               <>
-                <Input
-                  placeholder="Full name"
-                  aria-label="Full name"
-                  autoComplete="name"
-                  value={form.name}
-                  onChange={e => update("name", e.target.value)}
-                />
-                <Input
-                  placeholder="Username (letters, numbers, underscore)"
-                  aria-label="Username"
-                  autoComplete="username"
-                  value={form.username}
-                  onChange={e =>
-                    update(
-                      "username",
-                      e.target.value.replace(/[^a-zA-Z0-9_]/g, "").slice(0, 48)
-                    )
-                  }
-                />
+                <div>
+                  <Input
+                    placeholder="Full name"
+                    aria-label="Full name"
+                    aria-invalid={feedbackFor("name")?.status === "invalid"}
+                    aria-describedby={
+                      touched.name ? "auth-name-feedback" : undefined
+                    }
+                    autoComplete="name"
+                    value={form.name}
+                    onChange={e => update("name", e.target.value)}
+                  />
+                  {renderFeedback("name")}
+                </div>
+                <div>
+                  <Input
+                    placeholder="Username (letters, numbers, underscore)"
+                    aria-label="Username"
+                    aria-invalid={feedbackFor("username")?.status === "invalid"}
+                    aria-describedby={
+                      touched.username ? "auth-username-feedback" : undefined
+                    }
+                    autoComplete="username"
+                    value={form.username}
+                    onChange={e =>
+                      update(
+                        "username",
+                        e.target.value
+                          .replace(/[^a-zA-Z0-9_]/g, "")
+                          .slice(0, 48)
+                      )
+                    }
+                  />
+                  {renderFeedback("username")}
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
@@ -383,60 +500,122 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
                     />
                   </>
                 )}
-                <Input
-                  type="email"
-                  placeholder="Email (optional)"
-                  aria-label="Email address (optional)"
-                  autoComplete="email"
-                  value={form.email}
-                  onChange={e => update("email", e.target.value)}
-                />
+                <div>
+                  <Input
+                    type="email"
+                    placeholder="Email (optional)"
+                    aria-label="Email address (optional)"
+                    aria-invalid={feedbackFor("email")?.status === "invalid"}
+                    aria-describedby={
+                      touched.email ? "auth-email-feedback" : undefined
+                    }
+                    autoComplete="email"
+                    value={form.email}
+                    onChange={e => update("email", e.target.value)}
+                  />
+                  {renderFeedback("email")}
+                </div>
               </>
             )}
-            <Input
-              inputMode={mode === "login" ? "text" : "tel"}
-              type={mode === "login" ? "text" : "tel"}
-              aria-label={
-                mode === "login"
-                  ? "Name, username, phone, or email"
-                  : "Phone number"
-              }
-              autoComplete={mode === "login" ? "username" : "tel"}
-              required
-              placeholder={
-                mode === "login"
-                  ? "Name, username, phone, or email"
-                  : "Phone number"
-              }
-              value={form.phone}
-              onChange={e => update("phone", e.target.value)}
-            />
-            <Input
-              type="password"
-              placeholder="Password"
-              aria-label="Password"
-              autoComplete={
-                mode === "login" ? "current-password" : "new-password"
-              }
-              required
-              value={form.password}
-              onChange={e => update("password", e.target.value)}
-            />
+            <div>
+              <Input
+                inputMode={mode === "login" ? "text" : "tel"}
+                type={mode === "login" ? "text" : "tel"}
+                aria-label={
+                  mode === "login"
+                    ? "Name, username, phone, or email"
+                    : "Phone number"
+                }
+                aria-invalid={feedbackFor("phone")?.status === "invalid"}
+                aria-describedby={
+                  touched.phone ? "auth-phone-feedback" : undefined
+                }
+                autoComplete={mode === "login" ? "username" : "tel"}
+                required
+                placeholder={
+                  mode === "login"
+                    ? "Name, username, phone, or email"
+                    : "Phone number"
+                }
+                value={form.phone}
+                onChange={e => update("phone", e.target.value)}
+              />
+              {renderFeedback("phone")}
+            </div>
+            <div>
+              <div className="relative">
+                <Input
+                  className="pr-12"
+                  type={showPassword ? "text" : "password"}
+                  placeholder="Password"
+                  aria-label="Password"
+                  aria-invalid={feedbackFor("password")?.status === "invalid"}
+                  aria-describedby={
+                    touched.password ? "auth-password-feedback" : undefined
+                  }
+                  autoComplete={
+                    mode === "login" ? "current-password" : "new-password"
+                  }
+                  required
+                  value={form.password}
+                  onChange={e => update("password", e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="absolute inset-y-0 right-2 grid w-9 place-items-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword(value => !value)}
+                >
+                  {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                </button>
+              </div>
+              {renderFeedback("password")}
+            </div>
             {mode === "register" && (
               <>
                 <PasswordEligibility
                   password={form.password}
                   confirm={form.confirm}
                 />
-                <Input
-                  type="password"
-                  placeholder="Confirm password"
-                  aria-label="Confirm password"
-                  autoComplete="new-password"
-                  required
-                  value={form.confirm}
-                  onChange={e => update("confirm", e.target.value)}
-                />
+                <div>
+                  <div className="relative">
+                    <Input
+                      className="pr-12"
+                      type={showConfirmation ? "text" : "password"}
+                      placeholder="Confirm password"
+                      aria-label="Confirm password"
+                      aria-invalid={
+                        feedbackFor("confirm")?.status === "invalid"
+                      }
+                      aria-describedby={
+                        touched.confirm ? "auth-confirm-feedback" : undefined
+                      }
+                      autoComplete="new-password"
+                      required
+                      value={form.confirm}
+                      onChange={e => update("confirm", e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="absolute inset-y-0 right-2 grid w-9 place-items-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                      aria-label={
+                        showConfirmation
+                          ? "Hide confirmation password"
+                          : "Show confirmation password"
+                      }
+                      aria-pressed={showConfirmation}
+                      onClick={() => setShowConfirmation(value => !value)}
+                    >
+                      {showConfirmation ? (
+                        <EyeOff size={17} />
+                      ) : (
+                        <Eye size={17} />
+                      )}
+                    </button>
+                  </div>
+                  {renderFeedback("confirm")}
+                </div>
               </>
             )}
             {authStatus && (
@@ -500,6 +679,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
           </p>
         </div>
       </div>
+      <PublicFooter />
     </div>
   );
 }
@@ -1142,6 +1322,12 @@ function ConnectionButton({ userId }: { userId: number }) {
     onError: e => toast.error(e.message),
   });
   const value = status.data || "connect";
+  if (value === "blocked")
+    return (
+      <Button variant="outline" className="rounded-xl" disabled>
+        Blocked
+      </Button>
+    );
   if (value === "connected")
     return (
       <Button variant="outline" className="rounded-xl" disabled>
@@ -1436,6 +1622,85 @@ function CommunityFeed() {
         ))}
       </div>
     </section>
+  );
+}
+
+function ProfileModerationActions({ targetUserId }: { targetUserId: number }) {
+  const utils = trpc.useUtils();
+  const [reason, setReason] = useState("");
+  const status = trpc.moderation.blockStatus.useQuery({ userId: targetUserId });
+  const refresh = async () => {
+    await Promise.all([
+      status.refetch(),
+      utils.discover.list.invalidate(),
+      utils.chats.list.invalidate(),
+      utils.connections.status.invalidate({ userId: targetUserId }),
+    ]);
+  };
+  const block = trpc.moderation.blockUser.useMutation({
+    onSuccess: async () => {
+      toast.success("User blocked");
+      await refresh();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const unblock = trpc.moderation.unblockUser.useMutation({
+    onSuccess: async () => {
+      toast.success("User unblocked");
+      await refresh();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const report = trpc.moderation.submitUserReport.useMutation({
+    onSuccess: () => {
+      toast.success("Report sent to Gridora administration");
+      setReason("");
+    },
+    onError: error => toast.error(error.message),
+  });
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        type="button"
+        variant="outline"
+        className="rounded-xl"
+        disabled={block.isPending || unblock.isPending || status.isLoading}
+        onClick={() =>
+          status.data?.blockedByMe
+            ? unblock.mutate({ userId: targetUserId })
+            : block.mutate({ userId: targetUserId })
+        }
+      >
+        {status.data?.blockedByMe ? "Unblock user" : "Block user"}
+      </Button>
+      {status.data?.blockedMe && (
+        <span className="text-xs text-muted-foreground">
+          This user has blocked this account.
+        </span>
+      )}
+      <details className="w-full sm:w-auto">
+        <summary className="cursor-pointer rounded-xl border px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
+          Report profile
+        </summary>
+        <div className="mt-2 space-y-2 rounded-xl border bg-background p-3 sm:absolute sm:z-20 sm:w-80">
+          <Textarea
+            value={reason}
+            onChange={event => setReason(event.target.value)}
+            placeholder="Explain the concern (5–1,500 characters)"
+            maxLength={1500}
+            className="min-h-24"
+          />
+          <Button
+            type="button"
+            className="w-full rounded-xl"
+            disabled={reason.trim().length < 5 || report.isPending}
+            onClick={() => report.mutate({ userId: targetUserId, reason })}
+          >
+            {report.isPending ? "Sending report…" : "Send report"}
+          </Button>
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -1777,6 +2042,7 @@ function ProfileView({
                 {editing ? "Close editor" : "Edit profile"}
               </Button>
             )}
+            {!ownProfile && <ProfileModerationActions targetUserId={data.id} />}
           </div>
           {editing && ownProfile ? (
             <div className="mt-6 grid gap-3 rounded-2xl bg-muted/60 p-4 sm:grid-cols-2">
@@ -2445,6 +2711,336 @@ function SettingsView({
     </div>
   );
 }
+
+function GridoraAiWidget() {
+  const utils = trpc.useUtils();
+  const [open, setOpen] = useState(false);
+  const [threadId, setThreadId] = useState<number | null>(null);
+  const [newThread, setNewThread] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [imageDataUrl, setImageDataUrl] = useState("");
+  const [memoryDraft, setMemoryDraft] = useState<string | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const threads = trpc.gridoraAI.threads.useQuery(undefined, {
+    enabled: open,
+    retry: false,
+  });
+  const messages = trpc.gridoraAI.messages.useQuery(
+    { threadId: threadId ?? 0 },
+    { enabled: open && Boolean(threadId), retry: false }
+  );
+  const memory = trpc.gridoraAI.memory.useQuery(undefined, {
+    enabled: open,
+    retry: false,
+  });
+  const send = trpc.gridoraAI.send.useMutation({
+    onSuccess: result => {
+      setThreadId(result.threadId);
+      setNewThread(false);
+      setDraft("");
+      setImageDataUrl("");
+      void threads.refetch();
+      if (result.threadId === threadId) void messages.refetch();
+      else
+        void utils.gridoraAI.messages.invalidate({ threadId: result.threadId });
+    },
+    onError: error => toast.error(error.message),
+  });
+  const saveMemory = trpc.gridoraAI.saveMemory.useMutation({
+    onSuccess: () => {
+      toast.success("Gridora AI design notes saved for your account");
+      void memory.refetch();
+      setMemoryDraft(null);
+    },
+    onError: error => toast.error(error.message),
+  });
+  useEffect(() => {
+    if (!threadId && !newThread && threads.data?.length)
+      setThreadId(threads.data[0].id);
+  }, [threadId, newThread, threads.data]);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
+  }, [messages.data?.length, open]);
+  const chooseImage = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
+      toast.error("Choose a PNG, JPG, or WebP image");
+      event.target.value = "";
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Images must be 5MB or smaller");
+      event.target.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setImageDataUrl(String(reader.result));
+    reader.readAsDataURL(file);
+  };
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if ((!draft.trim() && !imageDataUrl) || send.isPending) return;
+    send.mutate({
+      ...(threadId && !newThread ? { threadId } : {}),
+      message:
+        draft.trim() || "Please give me graphic-design feedback on this image.",
+      ...(imageDataUrl ? { imageDataUrl } : {}),
+    });
+  };
+  const currentMemory = memoryDraft ?? memory.data?.designMemory ?? "";
+  return (
+    <>
+      {open && (
+        <section
+          className="fixed bottom-[calc(5.25rem+env(safe-area-inset-bottom))] right-3 z-50 flex w-[min(94vw,25rem)] flex-col overflow-hidden rounded-3xl border bg-card shadow-2xl sm:right-5"
+          style={{
+            maxHeight: "calc(100dvh - 7.5rem - env(safe-area-inset-bottom))",
+            height: "min(34rem, 72dvh)",
+          }}
+          aria-label="Gridora AI chat"
+        >
+          <header className="flex shrink-0 items-center gap-3 border-b p-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-primary/10 text-primary">
+              <Sparkles size={19} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <h2 className="font-bold">Gridora AI</h2>
+              <p className="text-[11px] text-muted-foreground">
+                Your graphic-design partner
+              </p>
+            </div>
+            <button
+              type="button"
+              className="rounded-lg p-2 text-xs font-semibold text-primary hover:bg-secondary"
+              onClick={() => {
+                setThreadId(null);
+                setNewThread(true);
+              }}
+            >
+              New chat
+            </button>
+            <button
+              type="button"
+              className="rounded-lg p-2 hover:bg-muted"
+              onClick={() => setOpen(false)}
+              aria-label="Close Gridora AI"
+            >
+              <X size={17} />
+            </button>
+          </header>
+          <div className="shrink-0 border-b px-3 py-2">
+            <label className="sr-only" htmlFor="gridora-ai-threads">
+              Saved Gridora AI conversations
+            </label>
+            <select
+              id="gridora-ai-threads"
+              className="h-9 w-full rounded-xl border bg-background px-3 text-xs"
+              value={newThread ? "new" : threadId ? String(threadId) : ""}
+              onChange={event => {
+                if (event.target.value === "new") {
+                  setThreadId(null);
+                  setNewThread(true);
+                } else {
+                  setThreadId(Number(event.target.value) || null);
+                  setNewThread(false);
+                }
+              }}
+            >
+              <option value="" disabled>
+                {threads.isLoading
+                  ? "Loading your conversations…"
+                  : "Choose a conversation"}
+              </option>
+              <option value="new">New conversation</option>
+              {threads.data?.map(thread => (
+                <option key={thread.id} value={String(thread.id)}>
+                  {thread.title}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
+            {memoryDraft !== null && (
+              <div className="rounded-xl border border-primary/20 bg-primary/5 p-3">
+                <label
+                  className="text-xs font-semibold"
+                  htmlFor="gridora-ai-memory"
+                >
+                  Your private design notes
+                </label>
+                <Textarea
+                  id="gridora-ai-memory"
+                  className="mt-2 min-h-20 text-xs"
+                  maxLength={2000}
+                  value={memoryDraft}
+                  onChange={event => setMemoryDraft(event.target.value)}
+                  placeholder="Styles, colors, fonts or ongoing design goals you want Gridora AI to remember…"
+                />
+                <div className="mt-2 flex justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setMemoryDraft(null)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={saveMemory.isPending}
+                    onClick={() =>
+                      saveMemory.mutate({ designMemory: memoryDraft })
+                    }
+                  >
+                    Save notes
+                  </Button>
+                </div>
+              </div>
+            )}
+            {messages.isLoading && threadId ? (
+              <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
+                <Loader2 size={15} className="animate-spin" /> Loading your
+                saved chat…
+              </div>
+            ) : messages.data?.length ? (
+              messages.data.map(message => (
+                <div
+                  key={message.id}
+                  className={`max-w-[90%] rounded-2xl px-3 py-2.5 text-sm ${message.role === "user" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted text-foreground"}`}
+                >
+                  {message.content &&
+                    (message.role === "assistant" ? (
+                      <div className="prose prose-sm dark:prose-invert max-w-none">
+                        <Streamdown>{message.content}</Streamdown>
+                      </div>
+                    ) : (
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                    ))}
+                  {message.imageUrl && (
+                    <img
+                      src={message.imageUrl}
+                      alt={
+                        message.role === "assistant"
+                          ? "Gridora AI edited design"
+                          : "Image shared with Gridora AI"
+                      }
+                      className="mt-2 max-h-52 w-full rounded-xl object-contain"
+                    />
+                  )}
+                </div>
+              ))
+            ) : (
+              <div className="flex min-h-36 flex-col items-center justify-center rounded-2xl border border-dashed p-5 text-center">
+                <Sparkles className="mb-2 text-primary" size={24} />
+                <p className="text-sm font-bold">
+                  Design, color, type or image ideas?
+                </p>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  Ask Gridora AI. Your chats and personal design notes are saved
+                  to your account.
+                </p>
+              </div>
+            )}
+            {send.isPending && (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 size={14} className="animate-spin" /> Gridora AI is
+                thinking…
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+          {imageDataUrl && (
+            <div className="flex shrink-0 items-center gap-2 border-t px-3 pt-2">
+              <img
+                src={imageDataUrl}
+                alt="Image ready to share"
+                className="h-12 w-12 rounded-lg object-cover"
+              />
+              <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                Image ready — ask for feedback or an edit
+              </span>
+              <button
+                type="button"
+                className="rounded-md p-1 hover:bg-muted"
+                aria-label="Remove selected image"
+                onClick={() => setImageDataUrl("")}
+              >
+                <X size={15} />
+              </button>
+            </div>
+          )}
+          <form
+            onSubmit={submit}
+            className="flex shrink-0 items-end gap-2 border-t bg-background/60 p-3"
+          >
+            <label
+              className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-xl border text-muted-foreground hover:bg-muted"
+              aria-label="Attach a design image"
+            >
+              <ImagePlus size={18} />
+              <input
+                type="file"
+                className="sr-only"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={chooseImage}
+              />
+            </label>
+            <Textarea
+              value={draft}
+              onChange={event => setDraft(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+              rows={1}
+              maxLength={4000}
+              placeholder="Ask a design question…"
+              aria-label="Message Gridora AI"
+              className="max-h-24 min-h-10 resize-none text-sm"
+            />
+            <Button
+              type="submit"
+              size="icon"
+              className="h-10 w-10 shrink-0 rounded-xl"
+              disabled={send.isPending || (!draft.trim() && !imageDataUrl)}
+              aria-label="Send to Gridora AI"
+            >
+              {send.isPending ? (
+                <Loader2 size={17} className="animate-spin" />
+              ) : (
+                <MessageCircle size={17} />
+              )}
+            </Button>
+          </form>
+          <div className="flex shrink-0 items-center justify-between gap-2 border-t px-3 py-2 text-[10px] text-muted-foreground">
+            <span>Graphic-design help only · private to your account</span>
+            <button
+              type="button"
+              className="shrink-0 font-semibold text-primary hover:underline"
+              onClick={() => setMemoryDraft(memory.data?.designMemory ?? "")}
+            >
+              Design notes
+            </button>
+          </div>
+        </section>
+      )}
+      <button
+        type="button"
+        className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-4 z-40 grid h-14 w-14 place-items-center rounded-full bg-primary text-primary-foreground shadow-xl shadow-primary/30 transition hover:scale-105 active:scale-95"
+        onClick={() => setOpen(value => !value)}
+        aria-label={open ? "Close Gridora AI" : "Open Gridora AI"}
+        aria-expanded={open}
+      >
+        {open ? <X size={22} /> : <Sparkles size={23} />}
+      </button>
+    </>
+  );
+}
 function AppShell({ user }: { user: any }) {
   const [tab, setTab] = useState<Tab>("chat");
   const [deepChat, setDeepChat] = useState<number | null>(null);
@@ -2574,7 +3170,9 @@ function AppShell({ user }: { user: any }) {
             }}
           />
         )}
+        {!fullChat && <PublicFooter />}
       </main>
+      {tab === "chat" && !fullChat && <GridoraAiWidget />}
       {!fullChat && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 shrink-0 border-t bg-card/95 px-2 py-2 pb-[calc(.5rem+env(safe-area-inset-bottom))] backdrop-blur-xl lg:static lg:mx-auto lg:mt-6 lg:flex lg:max-w-xl lg:rounded-2xl lg:border lg:px-3 lg:shadow-lg">
           <div className="container flex max-w-xl items-center justify-around p-0">

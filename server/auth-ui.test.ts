@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getAuthErrorMessage,
+  getAuthFieldFeedback,
   isAuthPasswordEligible,
   validateAuthForm,
   type AuthFormData,
@@ -16,6 +17,48 @@ const baseForm: AuthFormData = {
 };
 
 describe("Gridora authentication form helpers", () => {
+  it("updates inline feedback immediately as registration fields become valid", () => {
+    expect(
+      getAuthFieldFeedback("register", "username", {
+        ...baseForm,
+        username: "av",
+      })
+    ).toMatchObject({ status: "invalid" });
+    expect(
+      getAuthFieldFeedback("register", "username", baseForm)
+    ).toMatchObject({ status: "valid", message: "Looks good." });
+  });
+
+  it("shows immediate password, phone, and confirmation feedback", () => {
+    expect(
+      getAuthFieldFeedback("register", "password", {
+        ...baseForm,
+        password: "short",
+      })
+    ).toMatchObject({ status: "invalid" });
+    expect(
+      getAuthFieldFeedback("register", "phone", {
+        ...baseForm,
+        phone: "123",
+      })
+    ).toMatchObject({ status: "invalid" });
+    expect(
+      getAuthFieldFeedback("register", "confirm", {
+        ...baseForm,
+        confirm: "Mismatch9",
+      })
+    ).toMatchObject({ status: "invalid" });
+  });
+
+  it("does not flag blank optional email and surfaces required fields after interaction", () => {
+    expect(
+      getAuthFieldFeedback("register", "email", { ...baseForm, email: "" })
+    ).toBeNull();
+    expect(
+      getAuthFieldFeedback("register", "name", { ...baseForm, name: "" }, true)
+    ).toMatchObject({ status: "invalid" });
+  });
+
   it("accepts a valid login identifier and password", () => {
     expect(validateAuthForm("login", baseForm)).toBeNull();
   });

@@ -92,6 +92,20 @@
       "when": 1790428684033,
       "tag": "0012_first_user_branding",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "5",
+      "when": 1790431615772,
+      "tag": "0013_user_moderation",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1790432553621,
+      "tag": "0014_gridora_ai_memory",
+      "breakpoints": true
     }
   ]
 }

@@ -25,6 +25,16 @@ export const users = mysqlTable(
       .default("client")
       .notNull(),
     role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+    moderationStatus: mysqlEnum("moderationStatus", [
+      "active",
+      "suspended",
+      "deleted",
+    ])
+      .default("active")
+      .notNull(),
+    moderationReason: text("moderationReason"),
+    moderatedBy: int("moderatedBy"),
+    moderatedAt: timestamp("moderatedAt"),
     bio: text("bio"),
     skills: text("skills"),
     experienceLevel: varchar("experienceLevel", { length: 32 }),
@@ -320,7 +330,27 @@ export const reports = mysqlTable(
     resolvedBy: int("resolvedBy"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
-  table => ({ statusIdx: index("reports_status_idx").on(table.status) })
+  table => ({
+    statusIdx: index("reports_status_idx").on(table.status),
+    reporterIdx: index("reports_reporter_idx").on(table.reporterId),
+  })
+);
+export const userBlocks = mysqlTable(
+  "user_blocks",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    blockedUserId: int("blockedUserId").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    pairIdx: uniqueIndex("user_blocks_pair_idx").on(
+      table.userId,
+      table.blockedUserId
+    ),
+    blockerIdx: index("user_blocks_blocker_idx").on(table.userId),
+    blockedIdx: index("user_blocks_blocked_idx").on(table.blockedUserId),
+  })
 );
 export const adminUsers = mysqlTable("admin_users", {
   id: int("id").autoincrement().primaryKey(),
@@ -343,6 +373,44 @@ export const adminSessions = mysqlTable(
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   table => ({ userIdx: index("admin_sessions_user_idx").on(table.userId) })
+);
+
+export const gridoraAiProfiles = mysqlTable("gridora_ai_profiles", {
+  userId: int("userId").primaryKey(),
+  designMemory: text("designMemory"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export const gridoraAiThreads = mysqlTable(
+  "gridora_ai_threads",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    title: varchar("title", { length: 160 }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  table => ({ userIdx: index("gridora_ai_threads_user_idx").on(table.userId) })
+);
+
+export const gridoraAiMessages = mysqlTable(
+  "gridora_ai_messages",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    threadId: int("threadId").notNull(),
+    userId: int("userId").notNull(),
+    role: mysqlEnum("role", ["user", "assistant"]).notNull(),
+    content: text("content").notNull(),
+    imageUrl: text("imageUrl"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    threadIdx: index("gridora_ai_messages_thread_idx").on(
+      table.threadId,
+      table.createdAt
+    ),
+    userIdx: index("gridora_ai_messages_user_idx").on(table.userId),
+  })
 );
 
 export type User = typeof users.$inferSelect;

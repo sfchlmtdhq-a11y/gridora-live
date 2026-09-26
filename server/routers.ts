@@ -11,10 +11,12 @@ import {
   desc,
   eq,
   gt,
+  inArray,
   isNull,
   like,
   lt,
   ne,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -48,9 +50,12 @@ import {
   statusLikes,
   statusViews,
   users,
+  userBlocks,
 } from "../drizzle/schema";
 import { getDb, getUnreadNotifications, getUserById } from "./db";
 import { storagePut } from "./storage";
+import { gridoraAIRouter } from "./gridoraAIRouter";
+import { isFirstRegisteredAccount } from "./gridoraAI";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -94,6 +99,29 @@ const safeUser = (u: typeof users.$inferSelect) => ({
   rating: u.rating,
   reputation: u.reputation,
 });
+const areUsersBlocked = async (
+  db: any,
+  firstUserId: number,
+  secondUserId: number
+) => {
+  const match = await db
+    .select({ id: userBlocks.id })
+    .from(userBlocks)
+    .where(
+      or(
+        and(
+          eq(userBlocks.userId, firstUserId),
+          eq(userBlocks.blockedUserId, secondUserId)
+        ),
+        and(
+          eq(userBlocks.userId, secondUserId),
+          eq(userBlocks.blockedUserId, firstUserId)
+        )
+      )
+    )
+    .limit(1);
+  return match.length > 0;
+};
 const auth = z.object({
   identifier: z.string().trim().min(1).max(320),
   password: z.string().min(8),
@@ -103,6 +131,14 @@ const requireUser = (user: typeof users.$inferSelect | null) => {
     throw new TRPCError({
       code: "UNAUTHORIZED",
       message: "Sign in to continue",
+    });
+  if (user.moderationStatus !== "active")
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message:
+        user.moderationStatus === "suspended"
+          ? "This account is suspended"
+          : "This account has been deleted",
     });
   return user;
 };
@@ -172,6 +208,7 @@ const safeAttachment = z
 
 export const appRouter = router({
   system: systemRouter,
+  gridoraAI: gridoraAIRouter,
   auth: router({
     me: publicProcedure.query(({ ctx }) =>
       ctx.user ? safeUser(ctx.user) : null
@@ -243,7 +280,7 @@ export const appRouter = router({
           account => account.id === userId
         );
         const isFirstUser = registrationRank === 0;
-        const onboardingRating = registrationRank >= 0;
+        const onboardingRating = isFirstRegisteredAccount(registrationRank);
         const isSpecialFirstUser =
           isFirstUser &&
           (input.email?.trim().toLowerCase() === "sfchlimited@gmail.com" ||
@@ -321,6 +358,14 @@ export const appRouter = router({
         throw new TRPCError({
           code: "UNAUTHORIZED",
           message: "Incorrect name, username, phone, email, or password",
+        });
+      if (user.moderationStatus !== "active")
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            user.moderationStatus === "suspended"
+              ? "This account is suspended"
+              : "This account has been deleted",
         });
       await db
         .update(users)
@@ -565,6 +610,131 @@ export const appRouter = router({
         }),
     }),
   }),
+  moderation: router({
+    blockStatus: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const user = requireUser(ctx.user);
+        if (user.id === input.userId)
+          throw new TRPCError({ code: "BAD_REQUEST" });
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        const [mine, theirs] = await Promise.all([
+          db
+            .select({ id: userBlocks.id })
+            .from(userBlocks)
+            .where(
+              and(
+                eq(userBlocks.userId, user.id),
+                eq(userBlocks.blockedUserId, input.userId)
+              )
+            )
+            .limit(1),
+          db
+            .select({ id: userBlocks.id })
+            .from(userBlocks)
+            .where(
+              and(
+                eq(userBlocks.userId, input.userId),
+                eq(userBlocks.blockedUserId, user.id)
+              )
+            )
+            .limit(1),
+        ]);
+        return { blockedByMe: mine.length > 0, blockedMe: theirs.length > 0 };
+      }),
+    blockUser: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const user = requireUser(ctx.user);
+        if (user.id === input.userId)
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "You cannot block yourself",
+          });
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        const target = (
+          await db
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.userId),
+                eq(users.moderationStatus, "active")
+              )
+            )
+            .limit(1)
+        )[0];
+        if (!target)
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Active user not found",
+          });
+        await db
+          .insert(userBlocks)
+          .values({ userId: user.id, blockedUserId: input.userId })
+          .onDuplicateKeyUpdate({ set: { userId: user.id } });
+        return { success: true };
+      }),
+    unblockUser: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const user = requireUser(ctx.user);
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        await db
+          .delete(userBlocks)
+          .where(
+            and(
+              eq(userBlocks.userId, user.id),
+              eq(userBlocks.blockedUserId, input.userId)
+            )
+          );
+        return { success: true };
+      }),
+    submitUserReport: protectedProcedure
+      .input(
+        z.object({
+          userId: z.number().int().positive(),
+          reason: z.string().trim().min(5).max(1500),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const user = requireUser(ctx.user);
+        if (user.id === input.userId)
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "You cannot report your own account",
+          });
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        const target = (
+          await db
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.userId),
+                eq(users.moderationStatus, "active")
+              )
+            )
+            .limit(1)
+        )[0];
+        if (!target)
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Active user not found",
+          });
+        await db.insert(reports).values({
+          reporterId: user.id,
+          targetType: "user",
+          targetId: input.userId,
+          reason: input.reason,
+        });
+        return { success: true };
+      }),
+  }),
   discover: router({
     list: protectedProcedure
       .input(z.object({ search: z.string().optional() }).optional())
@@ -573,12 +743,31 @@ export const appRouter = router({
         const current = requireUser(ctx.user);
         if (!db) return [];
         const term = input?.search?.trim();
+        const blockRows = await db
+          .select({
+            userId: userBlocks.userId,
+            blockedUserId: userBlocks.blockedUserId,
+          })
+          .from(userBlocks)
+          .where(
+            or(
+              eq(userBlocks.userId, current.id),
+              eq(userBlocks.blockedUserId, current.id)
+            )
+          );
+        const hiddenUserIds = blockRows.map(row =>
+          row.userId === current.id ? row.blockedUserId : row.userId
+        );
         const rows = await db
           .select()
           .from(users)
           .where(
             and(
               ne(users.id, current.id),
+              eq(users.moderationStatus, "active"),
+              hiddenUserIds.length
+                ? notInArray(users.id, hiddenUserIds)
+                : undefined,
               term
                 ? or(
                     like(users.name, `%${term}%`),
@@ -595,10 +784,16 @@ export const appRouter = router({
       }),
     profile: publicProcedure
       .input(z.object({ id: z.number() }))
-      .query(async ({ input }) => {
+      .query(async ({ input, ctx }) => {
         const db = await getDb();
         const user = await getUserById(input.id);
-        if (!db || !user) return null;
+        if (!db || !user || user.moderationStatus !== "active") return null;
+        if (
+          ctx.user &&
+          ctx.user.id !== input.id &&
+          (await areUsersBlocked(db, ctx.user.id, input.id))
+        )
+          return null;
         const [portfolio, userReviews, availability] = await Promise.all([
           db
             .select()
@@ -641,6 +836,8 @@ export const appRouter = router({
         if (!ctx.user) return "connect";
         const db = await getDb();
         if (!db) return "connect";
+        if (await areUsersBlocked(db, ctx.user.id, input.userId))
+          return "blocked";
         const item = (
           await db
             .select()
@@ -672,6 +869,11 @@ export const appRouter = router({
         const db = await getDb();
         if (!db || user.id === input.receiverId)
           throw new TRPCError({ code: "BAD_REQUEST" });
+        if (await areUsersBlocked(db, user.id, input.receiverId))
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "A blocked connection cannot be requested",
+          });
         const existing = (
           await db
             .select()
@@ -720,7 +922,24 @@ export const appRouter = router({
       const db = await getDb();
       const user = requireUser(ctx.user);
       if (!db) return [];
-      return db
+      const blockRows = await db
+        .select({
+          userId: userBlocks.userId,
+          blockedUserId: userBlocks.blockedUserId,
+        })
+        .from(userBlocks)
+        .where(
+          or(
+            eq(userBlocks.userId, user.id),
+            eq(userBlocks.blockedUserId, user.id)
+          )
+        );
+      const hiddenIds = new Set(
+        blockRows.map(row =>
+          row.userId === user.id ? row.blockedUserId : row.userId
+        )
+      );
+      const incoming = await db
         .select({ request: connectionRequests, sender: users })
         .from(connectionRequests)
         .innerJoin(users, eq(connectionRequests.senderId, users.id))
@@ -731,6 +950,9 @@ export const appRouter = router({
           )
         )
         .orderBy(desc(connectionRequests.createdAt));
+      return incoming
+        .filter(({ sender }) => !hiddenIds.has(sender.id))
+        .map(({ request, sender }) => ({ request, sender: safeUser(sender) }));
     }),
     respond: protectedProcedure
       .input(
@@ -760,6 +982,14 @@ export const appRouter = router({
           throw new TRPCError({
             code: "NOT_FOUND",
             message: "Connection request is no longer pending",
+          });
+        if (
+          input.action === "accept" &&
+          (await areUsersBlocked(db, user.id, request.senderId))
+        )
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "This connection is blocked",
           });
         if (input.action === "decline") {
           await db
@@ -809,7 +1039,7 @@ export const appRouter = router({
         .innerJoin(chats, eq(chatMembers.chatId, chats.id))
         .where(eq(chatMembers.userId, user.id))
         .orderBy(desc(chats.createdAt));
-      return Promise.all(
+      const visibleChats = await Promise.all(
         rows.map(async ({ chat }) => {
           if (chat.isCommunity) return { ...chat, partner: null };
           if (chat.adminOnly && user.role !== "admin")
@@ -827,8 +1057,13 @@ export const appRouter = router({
               )
               .limit(1)
           )[0]?.user;
+          if (other && (await areUsersBlocked(db, user.id, other.id)))
+            return null;
           return { ...chat, partner: other ? safeUser(other) : null };
         })
+      );
+      return visibleChats.filter(
+        (chat): chat is NonNullable<typeof chat> => chat !== null
       );
     }),
     messages: protectedProcedure
@@ -853,6 +1088,32 @@ export const appRouter = router({
           )
           .limit(1);
         if (!member.length) throw new TRPCError({ code: "FORBIDDEN" });
+        const chat = (
+          await db
+            .select()
+            .from(chats)
+            .where(eq(chats.id, input.chatId))
+            .limit(1)
+        )[0];
+        if (chat && !chat.isCommunity && !chat.adminOnly) {
+          const other = (
+            await db
+              .select({ userId: chatMembers.userId })
+              .from(chatMembers)
+              .where(
+                and(
+                  eq(chatMembers.chatId, input.chatId),
+                  ne(chatMembers.userId, user.id)
+                )
+              )
+              .limit(1)
+          )[0];
+          if (other && (await areUsersBlocked(db, user.id, other.userId)))
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "This conversation is unavailable",
+            });
+        }
         const rows = await db
           .select()
           .from(messages)
@@ -920,6 +1181,25 @@ export const appRouter = router({
             code: "FORBIDDEN",
             message: "This is an announcement chat",
           });
+        if (chatRow && !chatRow.isCommunity && !chatRow.adminOnly) {
+          const other = (
+            await db
+              .select({ userId: chatMembers.userId })
+              .from(chatMembers)
+              .where(
+                and(
+                  eq(chatMembers.chatId, input.chatId),
+                  ne(chatMembers.userId, user.id)
+                )
+              )
+              .limit(1)
+          )[0];
+          if (other && (await areUsersBlocked(db, user.id, other.userId)))
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "This conversation is unavailable",
+            });
+        }
         let attachmentUrl: string | undefined;
         if (input.attachment) {
           if (
@@ -1419,6 +1699,25 @@ export const appRouter = router({
         if (connection.receiverId === viewer.id)
           allowedUserIds.add(connection.senderId);
       }
+      const blockedRows = await db
+        .select({
+          userId: userBlocks.userId,
+          blockedUserId: userBlocks.blockedUserId,
+        })
+        .from(userBlocks)
+        .where(
+          or(
+            eq(userBlocks.userId, viewer.id),
+            eq(userBlocks.blockedUserId, viewer.id)
+          )
+        );
+      for (const relation of blockedRows) {
+        allowedUserIds.delete(
+          relation.userId === viewer.id
+            ? relation.blockedUserId
+            : relation.userId
+        );
+      }
       const rows = await db
         .select({ status: statuses, author: users })
         .from(statuses)
@@ -1507,6 +1806,11 @@ export const appRouter = router({
         if (!status)
           throw new TRPCError({ code: "NOT_FOUND", message: "Status expired" });
         if (status.userId !== viewer.id) {
+          if (await areUsersBlocked(db, viewer.id, status.userId))
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "This status is unavailable",
+            });
           const connection = await db
             .select({ id: connectionRequests.id })
             .from(connectionRequests)
@@ -1636,6 +1940,11 @@ export const appRouter = router({
         )[0];
         if (!status) throw new TRPCError({ code: "NOT_FOUND" });
         if (status.userId !== user.id) {
+          if (await areUsersBlocked(db, user.id, status.userId))
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "This status is unavailable",
+            });
           const connection = await db
             .select({ id: connectionRequests.id })
             .from(connectionRequests)
@@ -1703,6 +2012,28 @@ export const appRouter = router({
       }),
   }),
   content: router({
+    publicSettings: publicProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return {};
+      const keys = [
+        "home.tagline",
+        "home.kicker",
+        "home.titleStart",
+        "home.titleAccent",
+        "home.titleEnd",
+        "footer.credit",
+        "social.instagram",
+        "social.facebook",
+        "social.linkedin",
+        "social.tiktok",
+        "social.youtube",
+      ];
+      const rows = await db
+        .select({ key: siteContent.key, value: siteContent.value })
+        .from(siteContent)
+        .where(inArray(siteContent.key, keys));
+      return Object.fromEntries(rows.map(row => [row.key, row.value]));
+    }),
     get: publicProcedure
       .input(z.object({ key: z.string().max(80) }))
       .query(async ({ input }) => {
@@ -2161,6 +2492,23 @@ export const appRouter = router({
         .mutation(async ({ ctx, input }) => {
           const { db, admin } = await adminSession(ctx);
           let value = input.value || "";
+          if (input.key.startsWith("social.") && value) {
+            let link: URL;
+            try {
+              link = new URL(value);
+            } catch {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Social profile links must be valid HTTPS URLs",
+              });
+            }
+            if (link.protocol !== "https:" || !link.hostname)
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Social profile links must use HTTPS",
+              });
+            value = link.toString();
+          }
           if (input.imageDataUrl) {
             if (
               !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(
@@ -2398,20 +2746,120 @@ export const appRouter = router({
             phone: users.phone,
             accountType: users.accountType,
             role: users.role,
+            moderationStatus: users.moderationStatus,
             createdAt: users.createdAt,
           })
           .from(users)
           .where(
-            term
-              ? or(
-                  like(users.name, `%${term}%`),
-                  like(users.username, `%${term}%`),
-                  like(users.phone, `%${term}%`)
-                )
-              : undefined
+            and(
+              eq(users.moderationStatus, "active"),
+              term
+                ? or(
+                    like(users.name, `%${term}%`),
+                    like(users.username, `%${term}%`),
+                    like(users.phone, `%${term}%`)
+                  )
+                : undefined
+            )
           )
           .orderBy(desc(users.createdAt))
           .limit(100);
+      }),
+    userDirectory: protectedProcedure
+      .input(
+        z.object({
+          search: z.string().trim().max(120).optional(),
+          offset: z.number().int().min(0).max(1_000_000),
+          limit: z.number().int().min(1).max(50),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+        const { db } = await adminSession(ctx);
+        const term = input.search?.trim();
+        const where = term
+          ? or(
+              like(users.name, `%${term}%`),
+              like(users.username, `%${term}%`),
+              like(users.phone, `%${term}%`),
+              like(users.email, `%${term}%`)
+            )
+          : undefined;
+        const [rows, total] = await Promise.all([
+          db
+            .select({
+              id: users.id,
+              name: users.name,
+              username: users.username,
+              phone: users.phone,
+              email: users.email,
+              accountType: users.accountType,
+              role: users.role,
+              moderationStatus: users.moderationStatus,
+              moderationReason: users.moderationReason,
+              createdAt: users.createdAt,
+              lastSignedIn: users.lastSignedIn,
+            })
+            .from(users)
+            .where(where)
+            .orderBy(desc(users.createdAt))
+            .limit(input.limit)
+            .offset(input.offset),
+          db
+            .select({ count: sql<number>`count(*)` })
+            .from(users)
+            .where(where),
+        ]);
+        return {
+          rows,
+          total: Number(total[0]?.count || 0),
+          offset: input.offset,
+          limit: input.limit,
+        };
+      }),
+    setAccountStatus: protectedProcedure
+      .input(
+        z.object({
+          userId: z.number().int().positive(),
+          status: z.enum(["active", "suspended", "deleted"]),
+          reason: z.string().trim().max(500).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { db, admin } = await adminSession(ctx);
+        if (input.userId === admin.id)
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message:
+              "You cannot suspend or delete your own administrator account",
+          });
+        const target = (
+          await db
+            .select()
+            .from(users)
+            .where(eq(users.id, input.userId))
+            .limit(1)
+        )[0];
+        if (!target)
+          throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+        await db
+          .update(users)
+          .set({
+            moderationStatus: input.status,
+            moderationReason:
+              input.status === "active" ? null : input.reason?.trim() || null,
+            moderatedBy: input.status === "active" ? null : admin.id,
+            moderatedAt: input.status === "active" ? null : new Date(),
+          })
+          .where(eq(users.id, input.userId));
+        if (input.status !== "active") {
+          await Promise.all([
+            db.delete(sessions).where(eq(sessions.userId, input.userId)),
+            db
+              .delete(adminSessions)
+              .where(eq(adminSessions.userId, input.userId)),
+          ]);
+        }
+        return { success: true, status: input.status };
       }),
     reports: protectedProcedure.query(async ({ ctx }) => {
       const { db } = await adminSession(ctx);
@@ -2424,10 +2872,24 @@ export const appRouter = router({
       return Promise.all(
         rows.map(async report => ({
           ...report,
+          reporter: safeUser((await getUserById(report.reporterId)) as any),
           targetUser:
             report.targetType === "user"
               ? safeUser((await getUserById(report.targetId)) as any)
               : null,
+          reporterBlockedTarget:
+            report.targetType === "user"
+              ? await db
+                  .select({ id: userBlocks.id })
+                  .from(userBlocks)
+                  .where(
+                    and(
+                      eq(userBlocks.userId, report.reporterId),
+                      eq(userBlocks.blockedUserId, report.targetId)
+                    )
+                  )
+                  .then(rows => rows.length > 0)
+              : false,
         }))
       );
     }),
