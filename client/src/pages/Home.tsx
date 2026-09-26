@@ -3,6 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useTheme } from "@/contexts/ThemeContext";
 import { trpc } from "@/lib/trpc";
+import { getAuthErrorMessage, validateAuthForm } from "@/lib/auth-ui";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { toast } from "sonner";
 import {
@@ -185,6 +186,10 @@ function PasswordEligibility({
 }
 function AuthPanel({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [authStatus, setAuthStatus] = useState<{
+    kind: "pending" | "success" | "error";
+    text: string;
+  } | null>(null);
   const [form, setForm] = useState({
     name: "",
     username: "",
@@ -196,39 +201,49 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
     bio: "",
     skills: "",
   });
+  const showAuthError = (message: string) => {
+    setAuthStatus({ kind: "error", text: message });
+    toast.error(message);
+  };
   const login = trpc.auth.login.useMutation({
     onSuccess: () => {
+      setAuthStatus({
+        kind: "success",
+        text: "Signed in. Opening your Gridora workspace…",
+      });
       toast.success("Welcome back to Gridora");
       onDone();
     },
-    onError: e => toast.error(e.message),
+    onError: e => showAuthError(getAuthErrorMessage("login", e.message)),
   });
   const register = trpc.auth.register.useMutation({
     onSuccess: () => {
+      setAuthStatus({
+        kind: "success",
+        text: "Account created. Preparing your Gridora profile…",
+      });
       toast.success("Account created — welcome to Gridora");
       onDone();
     },
-    onError: e => toast.error(e.message),
+    onError: e => showAuthError(getAuthErrorMessage("register", e.message)),
   });
   const update = (key: keyof typeof form, value: string) =>
     setForm(v => ({ ...v, [key]: value }));
-  const validPassword =
-    form.password.length >= 8 &&
-    /\d/.test(form.password) &&
-    /[A-Z]/.test(form.password);
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    setAuthStatus(null);
     if (mode === "login") {
-      if (!form.phone.trim() || form.password.length < 8)
-        return toast.error(
-          "Enter your name, username, phone, or email and password"
-        );
+      const validationError = validateAuthForm("login", form);
+      if (validationError) return showAuthError(validationError);
+      setAuthStatus({
+        kind: "pending",
+        text: "Verifying your sign-in details…",
+      });
       login.mutate({ identifier: form.phone, password: form.password });
     } else {
-      if (!validPassword)
-        return toast.error("Meet all password eligibility requirements");
-      if (form.password !== form.confirm)
-        return toast.error("Passwords do not match");
+      const validationError = validateAuthForm("register", form);
+      if (validationError) return showAuthError(validationError);
+      setAuthStatus({ kind: "pending", text: "Creating your secure account…" });
       register.mutate({
         name: form.name,
         username: form.username,
@@ -243,8 +258,8 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
   };
   const pending = login.isPending || register.isPending;
   return (
-    <div className="min-h-screen bg-background page-grid">
-      <div className="container flex min-h-screen flex-col justify-center py-8 lg:flex-row lg:items-center lg:gap-20">
+    <div className="auth-page h-[100dvh] min-h-0 overflow-y-auto overscroll-contain bg-background page-grid">
+      <div className="container flex min-h-full flex-col justify-start py-6 sm:py-8 lg:flex-row lg:items-center lg:justify-center lg:gap-20">
         <div className="mb-8 max-w-xl lg:mb-0">
           <Brand />
           <div className="mt-10 space-y-5">
@@ -270,33 +285,56 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
             </div>
           </div>
         </div>
-        <div className="w-full max-w-md rounded-[2rem] border bg-card p-6 soft-shadow sm:p-8">
-          <div className="mb-6 flex rounded-xl bg-muted p-1">
+        <div className="auth-form-panel w-full max-w-md rounded-[2rem] border bg-card p-5 soft-shadow sm:p-8">
+          <div
+            className="mb-6 flex rounded-xl bg-muted p-1"
+            role="group"
+            aria-label="Authentication mode"
+          >
             <button
               type="button"
+              aria-pressed={mode === "login"}
+              disabled={pending}
               className={`flex-1 rounded-lg py-2 text-sm font-bold ${mode === "login" ? "bg-card shadow-sm" : "text-muted-foreground"}`}
-              onClick={() => setMode("login")}
+              onClick={() => {
+                setMode("login");
+                setAuthStatus(null);
+              }}
             >
               Log in
             </button>
             <button
               type="button"
+              aria-pressed={mode === "register"}
+              disabled={pending}
               className={`flex-1 rounded-lg py-2 text-sm font-bold ${mode === "register" ? "bg-card shadow-sm" : "text-muted-foreground"}`}
-              onClick={() => setMode("register")}
+              onClick={() => {
+                setMode("register");
+                setAuthStatus(null);
+              }}
             >
               Create account
             </button>
           </div>
-          <form onSubmit={submit} className="space-y-4">
+          <form
+            onSubmit={submit}
+            className="auth-form space-y-4"
+            aria-busy={pending}
+            noValidate
+          >
             {mode === "register" && (
               <>
                 <Input
                   placeholder="Full name"
+                  aria-label="Full name"
+                  autoComplete="name"
                   value={form.name}
                   onChange={e => update("name", e.target.value)}
                 />
                 <Input
                   placeholder="Username (letters, numbers, underscore)"
+                  aria-label="Username"
+                  autoComplete="username"
                   value={form.username}
                   onChange={e =>
                     update(
@@ -308,6 +346,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
+                    disabled={pending}
                     onClick={() => update("accountType", "designer")}
                     className={`rounded-xl border p-3 text-left text-sm ${form.accountType === "designer" ? "border-primary bg-secondary" : ""}`}
                   >
@@ -318,6 +357,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
                   </button>
                   <button
                     type="button"
+                    disabled={pending}
                     onClick={() => update("accountType", "client")}
                     className={`rounded-xl border p-3 text-left text-sm ${form.accountType === "client" ? "border-primary bg-secondary" : ""}`}
                   >
@@ -331,11 +371,13 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
                   <>
                     <Input
                       placeholder="Skills e.g. Brand, UI/UX, Motion"
+                      aria-label="Professional skills"
                       value={form.skills}
                       onChange={e => update("skills", e.target.value)}
                     />
                     <Textarea
                       placeholder="A short professional bio"
+                      aria-label="Professional bio"
                       value={form.bio}
                       onChange={e => update("bio", e.target.value)}
                     />
@@ -344,6 +386,8 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
                 <Input
                   type="email"
                   placeholder="Email (optional)"
+                  aria-label="Email address (optional)"
+                  autoComplete="email"
                   value={form.email}
                   onChange={e => update("email", e.target.value)}
                 />
@@ -352,6 +396,13 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
             <Input
               inputMode={mode === "login" ? "text" : "tel"}
               type={mode === "login" ? "text" : "tel"}
+              aria-label={
+                mode === "login"
+                  ? "Name, username, phone, or email"
+                  : "Phone number"
+              }
+              autoComplete={mode === "login" ? "username" : "tel"}
+              required
               placeholder={
                 mode === "login"
                   ? "Name, username, phone, or email"
@@ -363,6 +414,11 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
             <Input
               type="password"
               placeholder="Password"
+              aria-label="Password"
+              autoComplete={
+                mode === "login" ? "current-password" : "new-password"
+              }
+              required
               value={form.password}
               onChange={e => update("password", e.target.value)}
             />
@@ -375,17 +431,62 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
                 <Input
                   type="password"
                   placeholder="Confirm password"
+                  aria-label="Confirm password"
+                  autoComplete="new-password"
+                  required
                   value={form.confirm}
                   onChange={e => update("confirm", e.target.value)}
                 />
               </>
             )}
+            {authStatus && (
+              <div
+                className={`auth-status flex items-start gap-2.5 rounded-xl border px-3 py-3 text-sm leading-5 ${authStatus.kind === "error" ? "border-destructive/30 bg-destructive/10 text-destructive" : authStatus.kind === "success" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" : "border-primary/25 bg-primary/10 text-foreground"}`}
+                role={authStatus.kind === "error" ? "alert" : "status"}
+                aria-live={authStatus.kind === "error" ? "assertive" : "polite"}
+                aria-atomic="true"
+              >
+                {authStatus.kind === "pending" ? (
+                  <Loader2
+                    size={17}
+                    className="mt-0.5 shrink-0 animate-spin text-primary"
+                    aria-hidden="true"
+                  />
+                ) : authStatus.kind === "success" ? (
+                  <Check
+                    size={17}
+                    className="mt-0.5 shrink-0"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <Info
+                    size={17}
+                    className="mt-0.5 shrink-0"
+                    aria-hidden="true"
+                  />
+                )}
+                <span>{authStatus.text}</span>
+              </div>
+            )}
             <Button
               className="h-12 w-full rounded-xl font-bold"
               disabled={pending}
+              aria-label={
+                pending
+                  ? mode === "login"
+                    ? "Signing in"
+                    : "Creating account"
+                  : undefined
+              }
             >
               {pending ? (
-                <Loader2 className="animate-spin" />
+                <>
+                  <Loader2
+                    className="mr-2 h-4 w-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                  {mode === "login" ? "Signing in…" : "Creating account…"}
+                </>
               ) : mode === "login" ? (
                 "Enter Gridora"
               ) : (
@@ -2504,8 +2605,25 @@ export default function Home() {
   const { user, loading, isAuthenticated, refresh } = useAuth();
   if (loading)
     return (
-      <div className="grid min-h-screen place-items-center">
-        <Loader2 className="animate-spin text-primary" />
+      <div className="auth-session-loading grid min-h-[100dvh] place-items-center bg-background page-grid px-6">
+        <div
+          className="flex flex-col items-center gap-4 text-center"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="grid h-12 w-12 place-items-center rounded-2xl border border-primary/25 bg-primary/10">
+            <Loader2
+              className="h-6 w-6 animate-spin text-primary"
+              aria-hidden="true"
+            />
+          </div>
+          <div>
+            <p className="font-semibold">Checking your secure session…</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Getting Gridora ready for you
+            </p>
+          </div>
+        </div>
       </div>
     );
   if (!isAuthenticated || !user) return <AuthPanel onDone={refresh} />;
