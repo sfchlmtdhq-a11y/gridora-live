@@ -85,6 +85,7 @@ const days = [
   "Friday",
   "Saturday",
 ];
+const GRIDORA_LOGO_MARK = "/manus-storage/gridora-logo-mark_68c0b48c.png";
 
 function Brand({ compact = false }: { compact?: boolean }) {
   const branding = trpc.content.get.useQuery(
@@ -102,7 +103,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
       link.rel = "icon";
       document.head.appendChild(link);
     }
-    link.href = favicon.data?.value || "/favicon.ico";
+    link.href = favicon.data?.value || GRIDORA_LOGO_MARK;
   }, [favicon.data?.value]);
   return (
     <div className="flex items-center gap-2">
@@ -113,9 +114,11 @@ function Brand({ compact = false }: { compact?: boolean }) {
           className="h-9 w-9 rounded-xl object-cover"
         />
       ) : (
-        <div className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/20">
-          <Hash size={19} strokeWidth={3} />
-        </div>
+        <img
+          src={GRIDORA_LOGO_MARK}
+          alt="Gridora logo"
+          className="h-9 w-9 rounded-xl object-cover shadow-lg shadow-primary/20"
+        />
       )}
       {!compact && (
         <div>
