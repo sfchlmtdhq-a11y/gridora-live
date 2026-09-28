@@ -4,9 +4,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { useTheme } from "@/contexts/ThemeContext";
 import { trpc } from "@/lib/trpc";
 import {
+  sortContacts,
   contactRatingStars,
   formatLastSeen,
   isConnectedContact,
+  type ContactSort,
 } from "@/lib/contact-display";
 import { advanceAdminShortcutTap } from "@/lib/admin-shortcut";
 import { shouldRenderPublicFooter } from "@/lib/public-footer";
@@ -1378,6 +1380,7 @@ function DiscoverView({
   onOpenProfile: (id: number) => void;
 }) {
   const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState<ContactSort>("connections");
   const [showRemoved, setShowRemoved] = useState(false);
   const utils = trpc.useUtils();
   const statuses = trpc.statuses.list.useQuery(undefined, {
@@ -1391,6 +1394,10 @@ function DiscoverView({
   const people = trpc.discover.list.useQuery(
     { search, includeHidden: showRemoved },
     { refetchInterval: 5000 }
+  );
+  const sortedPeople = useMemo(
+    () => sortContacts(people.data || [], sortBy),
+    [people.data, sortBy]
   );
   const removeContact = trpc.connections.remove.useMutation({
     onSuccess: async () => {
@@ -1477,17 +1484,31 @@ function DiscoverView({
             Connect with people, see your accepted contacts, and manage your list.
           </p>
         </div>
-        <div className="relative sm:w-72">
-          <Search
-            className="absolute left-3 top-3 text-muted-foreground"
-            size={17}
-          />
-          <Input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="h-11 rounded-xl bg-card pl-10"
-            placeholder="Search contacts"
-          />
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <div className="relative min-w-0 flex-1 sm:w-72">
+            <Search
+              className="absolute left-3 top-3 text-muted-foreground"
+              size={17}
+            />
+            <Input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="h-11 rounded-xl bg-card pl-10"
+              placeholder="Search contacts"
+              aria-label="Search contacts by name, username, email, or phone"
+            />
+          </div>
+          <select
+            value={sortBy}
+            onChange={event => setSortBy(event.target.value as ContactSort)}
+            className="h-11 w-full rounded-xl border bg-card px-3 text-sm sm:w-48"
+            aria-label="Sort contacts"
+          >
+            <option value="connections">Connected first</option>
+            <option value="name-asc">Name: A to Z</option>
+            <option value="name-desc">Name: Z to A</option>
+            <option value="rating">Highest rated</option>
+          </select>
         </div>
       </div>
       <div className="mt-4 flex max-w-3xl justify-end">
@@ -1504,8 +1525,8 @@ function DiscoverView({
           Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-24 animate-pulse rounded-2xl bg-muted" />
           ))
-        ) : people.data?.length ? (
-          people.data.map(person => {
+        ) : sortedPeople.length ? (
+          sortedPeople.map(person => {
             const connected = isConnectedContact(person.connectionStatus);
             const stars = contactRatingStars(
               person.onboardingRating,

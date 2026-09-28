@@ -38,3 +38,36 @@ export function contactRatingStars(
 export function isConnectedContact(connectionStatus: string): boolean {
   return connectionStatus === "connected";
 }
+
+export type ContactSort = "connections" | "name-asc" | "name-desc" | "rating";
+
+export type SortableContact = {
+  name?: string | null;
+  rating?: number | string | null;
+  connectionStatus?: string;
+  isHidden?: boolean;
+};
+
+export function sortContacts<T extends SortableContact>(
+  contacts: readonly T[],
+  sortBy: ContactSort
+): T[] {
+  const connectionRank = (status?: string) =>
+    status === "connected" ? 0 : status === "accept" || status === "request_sent" ? 1 : 2;
+  const alphabetical = (a: T, b: T) =>
+    (a.name || "").localeCompare(b.name || "", undefined, {
+      sensitivity: "base",
+    });
+
+  return [...contacts].sort((a, b) => {
+    if (Boolean(a.isHidden) !== Boolean(b.isHidden))
+      return Number(Boolean(a.isHidden)) - Number(Boolean(b.isHidden));
+    if (sortBy === "name-asc") return alphabetical(a, b);
+    if (sortBy === "name-desc") return alphabetical(b, a);
+    if (sortBy === "rating") {
+      const score = Number(b.rating || 0) - Number(a.rating || 0);
+      return score || alphabetical(a, b);
+    }
+    return connectionRank(a.connectionStatus) - connectionRank(b.connectionStatus) || alphabetical(a, b);
+  });
+}

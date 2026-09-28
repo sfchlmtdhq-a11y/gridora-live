@@ -825,6 +825,7 @@ export const appRouter = router({
                 ? or(
                     like(users.name, `%${term}%`),
                     like(users.username, `%${term}%`),
+                    like(users.email, `%${term}%`),
                     like(users.skills, `%${term}%`),
                     like(users.phone, `%${normalizePhone(term)}%`)
                   )

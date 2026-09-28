@@ -3,6 +3,7 @@ import {
   contactRatingStars,
   formatLastSeen,
   isConnectedContact,
+  sortContacts,
 } from "../client/src/lib/contact-display";
 
 describe("Gridora chat last-seen labels", () => {
@@ -38,5 +39,40 @@ describe("Gridora chat last-seen labels", () => {
     expect(isConnectedContact("connected")).toBe(true);
     expect(isConnectedContact("request_sent")).toBe(false);
     expect(isConnectedContact("connect")).toBe(false);
+  });
+
+  it("sorts contacts alphabetically in both directions", () => {
+    const contacts = [{ name: "Mina" }, { name: "alex" }, { name: "Zara" }];
+    expect(sortContacts(contacts, "name-asc").map(person => person.name)).toEqual([
+      "alex",
+      "Mina",
+      "Zara",
+    ]);
+    expect(sortContacts(contacts, "name-desc").map(person => person.name)).toEqual([
+      "Zara",
+      "Mina",
+      "alex",
+    ]);
+  });
+
+  it("sorts by accepted status or rating and keeps removed contacts last", () => {
+    const contacts = [
+      { name: "Zo", connectionStatus: "connect", rating: 50 },
+      { name: "Ana", connectionStatus: "connected", rating: 20 },
+      { name: "Kai", connectionStatus: "request_sent", rating: 40 },
+      { name: "Bea", connectionStatus: "connected", rating: 40, isHidden: true },
+    ];
+    expect(sortContacts(contacts, "connections").map(person => person.name)).toEqual([
+      "Ana",
+      "Kai",
+      "Zo",
+      "Bea",
+    ]);
+    expect(sortContacts(contacts, "rating").map(person => person.name)).toEqual([
+      "Zo",
+      "Kai",
+      "Ana",
+      "Bea",
+    ]);
   });
 });
