@@ -352,6 +352,22 @@ export const userBlocks = mysqlTable(
     blockedIdx: index("user_blocks_blocked_idx").on(table.blockedUserId),
   })
 );
+export const hiddenContacts = mysqlTable(
+  "hidden_contacts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    hiddenUserId: int("hiddenUserId").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    pairIdx: uniqueIndex("hidden_contacts_pair_idx").on(
+      table.userId,
+      table.hiddenUserId
+    ),
+    userIdx: index("hidden_contacts_user_idx").on(table.userId),
+  })
+);
 export const adminUsers = mysqlTable("admin_users", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull().unique(),

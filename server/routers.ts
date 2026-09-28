@@ -41,6 +41,7 @@ import {
   gridoraAiMessages,
   gridoraAiProfiles,
   gridoraAiThreads,
+  hiddenContacts,
   siteContent,
   portfolioProjects,
   postLikes,
@@ -746,7 +747,14 @@ export const appRouter = router({
   }),
   discover: router({
     list: protectedProcedure
-      .input(z.object({ search: z.string().optional() }).optional())
+      .input(
+        z
+          .object({
+            search: z.string().optional(),
+            includeHidden: z.boolean().optional(),
+          })
+          .optional()
+      )
       .query(async ({ input, ctx }) => {
         const db = await getDb();
         const current = requireUser(ctx.user);
@@ -767,6 +775,39 @@ export const appRouter = router({
         const hiddenUserIds = blockRows.map(row =>
           row.userId === current.id ? row.blockedUserId : row.userId
         );
+        const hiddenContactsForUser = await db
+          .select({ hiddenUserId: hiddenContacts.hiddenUserId })
+          .from(hiddenContacts)
+          .where(eq(hiddenContacts.userId, current.id));
+        const hiddenContactIds = new Set(
+          hiddenContactsForUser.map(row => row.hiddenUserId)
+        );
+        const relationshipRows = await db
+          .select()
+          .from(connectionRequests)
+          .where(
+            or(
+              eq(connectionRequests.senderId, current.id),
+              eq(connectionRequests.receiverId, current.id)
+            )
+          );
+        const relationshipByUser = new Map<number, string>();
+        for (const relation of relationshipRows) {
+          const otherId =
+            relation.senderId === current.id
+              ? relation.receiverId
+              : relation.senderId;
+          relationshipByUser.set(
+            otherId,
+            relation.status === "accepted"
+              ? "connected"
+              : relation.status === "pending"
+                ? relation.senderId === current.id
+                  ? "request_sent"
+                  : "accept"
+                : "connect"
+          );
+        }
         const rows = await db
           .select()
           .from(users)
@@ -776,6 +817,9 @@ export const appRouter = router({
               eq(users.moderationStatus, "active"),
               hiddenUserIds.length
                 ? notInArray(users.id, hiddenUserIds)
+                : undefined,
+              !input?.includeHidden && hiddenContactIds.size
+                ? notInArray(users.id, Array.from(hiddenContactIds))
                 : undefined,
               term
                 ? or(
@@ -789,7 +833,11 @@ export const appRouter = router({
           )
           .orderBy(desc(users.reputation))
           .limit(40);
-        return rows.map(safeUser);
+        return rows.map(person => ({
+          ...safeUser(person),
+          connectionStatus: relationshipByUser.get(person.id) || "connect",
+          isHidden: hiddenContactIds.has(person.id),
+        }));
       }),
     profile: publicProcedure
       .input(z.object({ id: z.number() }))
@@ -883,6 +931,21 @@ export const appRouter = router({
             code: "FORBIDDEN",
             message: "A blocked connection cannot be requested",
           });
+        const removed = await db
+          .select({ id: hiddenContacts.id })
+          .from(hiddenContacts)
+          .where(
+            and(
+              eq(hiddenContacts.userId, user.id),
+              eq(hiddenContacts.hiddenUserId, input.receiverId)
+            )
+          )
+          .limit(1);
+        if (removed.length)
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: "Restore this contact before connecting again",
+          });
         const existing = (
           await db
             .select()
@@ -948,6 +1011,11 @@ export const appRouter = router({
           row.userId === user.id ? row.blockedUserId : row.userId
         )
       );
+      const removedContacts = await db
+        .select({ userId: hiddenContacts.hiddenUserId })
+        .from(hiddenContacts)
+        .where(eq(hiddenContacts.userId, user.id));
+      for (const row of removedContacts) hiddenIds.add(row.userId);
       const incoming = await db
         .select({ request: connectionRequests, sender: users })
         .from(connectionRequests)
@@ -1036,6 +1104,99 @@ export const appRouter = router({
         );
         return { status: "accepted" as const, chatId };
       }),
+    remove: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const user = requireUser(ctx.user);
+        if (user.id === input.userId)
+          throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot remove yourself" });
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        const target = (
+          await db
+            .select({ id: users.id })
+            .from(users)
+            .where(
+              and(
+                eq(users.id, input.userId),
+                eq(users.moderationStatus, "active")
+              )
+            )
+            .limit(1)
+        )[0];
+        if (!target)
+          throw new TRPCError({ code: "NOT_FOUND", message: "Active user not found" });
+
+        await db.transaction(async tx => {
+          await tx.delete(connectionRequests).where(
+            or(
+              and(
+                eq(connectionRequests.senderId, user.id),
+                eq(connectionRequests.receiverId, input.userId)
+              ),
+              and(
+                eq(connectionRequests.senderId, input.userId),
+                eq(connectionRequests.receiverId, user.id)
+              )
+            )
+          );
+          const chatsForUser = await tx
+            .select({ chatId: chats.id })
+            .from(chatMembers)
+            .innerJoin(chats, eq(chats.id, chatMembers.chatId))
+            .where(
+              and(
+                eq(chatMembers.userId, user.id),
+                eq(chats.isCommunity, false),
+                eq(chats.adminOnly, false)
+              )
+            );
+          for (const row of chatsForUser) {
+            const otherMember = await tx
+              .select({ userId: chatMembers.userId })
+              .from(chatMembers)
+              .where(
+                and(
+                  eq(chatMembers.chatId, row.chatId),
+                  eq(chatMembers.userId, input.userId)
+                )
+              )
+              .limit(1);
+            if (otherMember.length)
+              await tx
+                .delete(chatMembers)
+                .where(
+                  and(
+                    eq(chatMembers.chatId, row.chatId),
+                    inArray(chatMembers.userId, [user.id, input.userId])
+                  )
+                );
+          }
+          await tx
+            .insert(hiddenContacts)
+            .values({ userId: user.id, hiddenUserId: input.userId })
+            .onDuplicateKeyUpdate({
+              set: { hiddenUserId: input.userId },
+            });
+        });
+        return { success: true };
+      }),
+    restore: protectedProcedure
+      .input(z.object({ userId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const user = requireUser(ctx.user);
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        await db
+          .delete(hiddenContacts)
+          .where(
+            and(
+              eq(hiddenContacts.userId, user.id),
+              eq(hiddenContacts.hiddenUserId, input.userId)
+            )
+          );
+        return { success: true };
+      }),
   }),
   chats: router({
     list: protectedProcedure.query(async ({ ctx }) => {
@@ -1068,7 +1229,12 @@ export const appRouter = router({
           )[0]?.user;
           if (other && (await areUsersBlocked(db, user.id, other.id)))
             return null;
-          return { ...chat, partner: other ? safeUser(other) : null };
+          return {
+            ...chat,
+            partner: other
+              ? { ...safeUser(other), lastSignedIn: other.lastSignedIn }
+              : null,
+          };
         })
       );
       return visibleChats.filter(

@@ -3,6 +3,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useTheme } from "@/contexts/ThemeContext";
 import { trpc } from "@/lib/trpc";
+import {
+  contactRatingStars,
+  formatLastSeen,
+  isConnectedContact,
+} from "@/lib/contact-display";
 import { advanceAdminShortcutTap } from "@/lib/admin-shortcut";
 import { shouldRenderPublicFooter } from "@/lib/public-footer";
 import { Streamdown } from "streamdown";
@@ -55,7 +60,7 @@ import {
   type FormEvent,
 } from "react";
 
-type Tab = "chat" | "discover" | "settings" | "profile";
+type Tab = "chat" | "discover" | "settings" | "profile" | "notifications";
 const initials = (name?: string | null) =>
   (name || "G")
     .split(" ")
@@ -685,6 +690,7 @@ function AuthPanel({ onDone }: { onDone: () => void }) {
 }
 
 function ConnectionRequests({ onChanged }: { onChanged: () => void }) {
+  const utils = trpc.useUtils();
   const incoming = trpc.connections.incoming.useQuery(undefined, {
     refetchInterval: 5000,
   });
@@ -695,6 +701,7 @@ function ConnectionRequests({ onChanged }: { onChanged: () => void }) {
       );
       incoming.refetch();
       onChanged();
+      void utils.discover.list.invalidate();
     },
     onError: e => toast.error(e.message),
   });
@@ -751,10 +758,12 @@ function ChatView({
   user,
   onFullScreen,
   initialChatId,
+  onOpenNotifications,
 }: {
   user: any;
   onFullScreen: (active: boolean) => void;
   initialChatId?: number | null;
+  onOpenNotifications: () => void;
 }) {
   const [activeChat, setActiveChat] = useState<number | null>(
     initialChatId ?? null
@@ -1224,14 +1233,19 @@ function ChatView({
                 Your chats
               </h1>
             </div>
-            <div className="relative">
+            <button
+              type="button"
+              className="relative rounded-xl p-2 hover:bg-muted"
+              onClick={onOpenNotifications}
+              aria-label={`Open notifications${unread.data?.length ? `, ${unread.data.length} unread` : ""}`}
+            >
               <Bell className="text-primary" size={19} />
               {unread.data?.length ? (
-                <span className="absolute -right-2 -top-2 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-1 text-[9px] font-bold text-white">
+                <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-primary px-1 text-[9px] font-bold text-white">
                   {unread.data.length}
                 </span>
               ) : null}
-            </div>
+            </button>
           </div>
           <div className="relative">
             <Search
@@ -1267,12 +1281,13 @@ function ChatView({
                     <span className="truncate font-bold">
                       {chat.partner?.name || chat.title || "Gridora Community"}
                     </span>
-                    <span className="text-[10px] text-muted-foreground">
-                      live
-                    </span>
                   </div>
                   <p className="truncate text-sm text-muted-foreground">
-                    Open conversation
+                    {chat.partner
+                      ? formatLastSeen(chat.partner.lastSignedIn)
+                      : chat.adminOnly
+                        ? "Gridora Support"
+                        : "Community conversation"}
                   </p>
                 </div>
               </button>
@@ -1318,6 +1333,7 @@ function ConnectionButton({ userId }: { userId: number }) {
     onSuccess: () => {
       toast.success("Connection request sent");
       utils.connections.status.invalidate({ userId });
+      void utils.discover.list.invalidate();
     },
     onError: e => toast.error(e.message),
   });
@@ -1362,14 +1378,37 @@ function DiscoverView({
   onOpenProfile: (id: number) => void;
 }) {
   const [search, setSearch] = useState("");
-  const people = trpc.discover.list.useQuery({ search });
+  const [showRemoved, setShowRemoved] = useState(false);
+  const utils = trpc.useUtils();
   const statuses = trpc.statuses.list.useQuery(undefined, {
     refetchInterval: 30000,
   });
   const [viewedStatus, setViewedStatus] = useState<any>(null);
   const viewStatus = trpc.statuses.view.useMutation({
     onSuccess: data => setViewedStatus(data),
-    onError: e => toast.error(e.message),
+    onError: error => toast.error(error.message),
+  });
+  const people = trpc.discover.list.useQuery(
+    { search, includeHidden: showRemoved },
+    { refetchInterval: 5000 }
+  );
+  const removeContact = trpc.connections.remove.useMutation({
+    onSuccess: async () => {
+      toast.success("Contact removed");
+      await Promise.all([
+        utils.discover.list.invalidate(),
+        utils.chats.list.invalidate(),
+        utils.statuses.list.invalidate(),
+      ]);
+    },
+    onError: error => toast.error(error.message),
+  });
+  const restoreContact = trpc.connections.restore.useMutation({
+    onSuccess: async () => {
+      toast.success("Contact restored");
+      await utils.discover.list.invalidate();
+    },
+    onError: error => toast.error(error.message),
   });
   return (
     <div className="container py-5 lg:py-8">
@@ -1429,13 +1468,13 @@ function DiscoverView({
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <p className="text-xs font-bold uppercase tracking-[.2em] text-primary">
-            Discover
+            Contacts
           </p>
           <h1 className="font-[Manrope] text-3xl font-extrabold tracking-tight">
-            Find your people
+            Your contacts
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Browse registered Gridora people and send a real connection request.
+            Connect with people, see your accepted contacts, and manage your list.
           </p>
         </div>
         <div className="relative sm:w-72">
@@ -1447,104 +1486,110 @@ function DiscoverView({
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="h-11 rounded-xl bg-card pl-10"
-            placeholder="Name, username, skill or phone"
+            placeholder="Search contacts"
           />
         </div>
       </div>
-      <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-4 flex max-w-3xl justify-end">
+        <button
+          type="button"
+          className="rounded-xl px-3 py-2 text-xs font-semibold text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={() => setShowRemoved(value => !value)}
+        >
+          {showRemoved ? "Hide removed contacts" : "Show removed contacts"}
+        </button>
+      </div>
+      <div className="mt-2 max-w-3xl space-y-2">
         {people.isLoading ? (
-          Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-56 animate-pulse rounded-3xl bg-muted" />
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-24 animate-pulse rounded-2xl bg-muted" />
           ))
         ) : people.data?.length ? (
-          people.data.map((person, i) => (
+          people.data.map(person => {
+            const connected = isConnectedContact(person.connectionStatus);
+            const stars = contactRatingStars(
+              person.onboardingRating,
+              person.rating
+            );
+            return (
             <div
               key={person.id}
-              className="group rounded-3xl border bg-card p-5 soft-shadow"
+              className={`flex flex-wrap items-center gap-3 rounded-2xl border bg-card px-3 py-3 transition-opacity sm:px-4 ${connected ? "opacity-60" : "opacity-100"} ${person.isHidden ? "opacity-50" : ""}`}
             >
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    className="shrink-0 rounded-2xl"
-                    onClick={() => {
-                      const status = statuses.data?.find(
-                        (item: any) => item.author.id === person.id
-                      );
-                      if (status) viewStatus.mutate({ statusId: status.id });
-                      else onOpenProfile(person.id);
-                    }}
-                    aria-label={`Open ${person.name}'s profile or status`}
-                  >
-                    <Avatar
-                      name={person.name}
-                      avatarUrl={person.avatarUrl}
-                      index={i}
-                      size="lg"
-                      hasStatus={statuses.data?.some(
-                        (item: any) => item.author.id === person.id
-                      )}
-                    />
-                  </button>
-                  <div>
-                    <div className="flex items-center gap-1">
-                      <h3 className="font-bold">{person.name}</h3>
-                      {person.verified && (
-                        <span
-                          className="text-primary"
-                          title="Verified Gridora profile"
-                        >
-                          ✓
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      @{person.username}
-                    </p>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-primary">
-                      {person.accountType}
-                    </p>
-                  </div>
-                </div>
-                <span className="rounded-full bg-secondary px-2 py-1 text-[10px] font-bold text-secondary-foreground">
-                  {person.availability || "Available"}
+              <button
+                type="button"
+                className="shrink-0 rounded-full"
+                onClick={() => onOpenProfile(person.id)}
+                aria-label={`Open ${person.name}'s profile`}
+              >
+                <Avatar name={person.name} avatarUrl={person.avatarUrl} size="sm" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenProfile(person.id)}
+                className="min-w-0 flex-1 text-left"
+              >
+                <span className="flex items-center gap-1 truncate text-sm font-bold">
+                  <span className="truncate">{person.name}</span>
+                  {person.verified && (
+                    <span className="shrink-0 text-primary" title="Verified Gridora profile">✓</span>
+                  )}
+                  {person.isHidden && <span className="shrink-0 text-[10px] font-semibold text-muted-foreground">Removed</span>}
                 </span>
-              </div>
-              <p className="mt-5 line-clamp-2 min-h-10 text-sm leading-5 text-muted-foreground">
-                {person.bio ||
-                  "Building thoughtful work and meaningful connections."}
-              </p>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {(person.skills || "Open to connect")
-                  .split(",")
-                  .slice(0, 3)
-                  .map(skill => (
-                    <span
-                      key={skill}
-                      className="rounded-lg bg-muted px-2 py-1 text-[11px] font-semibold"
-                    >
-                      {skill.trim()}
-                    </span>
-                  ))}
-              </div>
-              <div className="mt-5 flex gap-2">
-                <Button
-                  variant="outline"
-                  className="flex-1 rounded-xl"
-                  onClick={() => onOpenProfile(person.id)}
+                <span
+                  className="block text-sm leading-5 tracking-wide text-primary"
+                  aria-label={`${stars} out of 5 stars`}
                 >
-                  View profile
+                  {"★".repeat(stars)}
+                  <span className="text-muted-foreground/40">{"☆".repeat(5 - stars)}</span>
+                </span>
+              </button>
+              {person.isHidden ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-xl"
+                  disabled={restoreContact.isPending}
+                  onClick={() => restoreContact.mutate({ userId: person.id })}
+                >
+                  Restore
                 </Button>
-                <ConnectionButton userId={person.id} />
-              </div>
+              ) : (
+                <>
+                  {connected ? (
+                    <Button size="sm" variant="outline" className="rounded-xl" disabled>
+                      Connected
+                    </Button>
+                  ) : (
+                    <ConnectionButton userId={person.id} />
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="rounded-xl text-muted-foreground"
+                    disabled={removeContact.isPending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Remove ${person.name} from your contacts? This disconnects the private chat for both accounts. You can restore the contact later.`
+                        )
+                      )
+                        removeContact.mutate({ userId: person.id });
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </>
+              )}
             </div>
-          ))
+          );
+          })
         ) : (
           <div className="col-span-full rounded-3xl border border-dashed p-12 text-center">
             <Compass className="mx-auto mb-3 text-primary" />
-            <p className="font-bold">No other Gridora users found</p>
+            <p className="font-bold">No contacts match your search</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Try a different name, username, skill, or phone number.
+              Try another name, or clear your search to see more contacts.
             </p>
           </div>
         )}
@@ -3195,7 +3240,17 @@ function AppShell({ user }: { user: any }) {
               <span className="hidden rounded-full bg-secondary px-3 py-1 text-xs font-bold text-secondary-foreground sm:inline">
                 {user.accountType === "designer" ? "Designer" : "Client"}
               </span>
-              <Avatar name={user.name} avatarUrl={user.avatarUrl} size="sm" />
+              <button
+                type="button"
+                className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                onClick={() => {
+                  setProfileId(null);
+                  setTab("profile");
+                }}
+                aria-label="Open your profile"
+              >
+                <Avatar name={user.name} avatarUrl={user.avatarUrl} size="sm" />
+              </button>
             </div>
           </div>
         </header>
@@ -3206,6 +3261,7 @@ function AppShell({ user }: { user: any }) {
             user={user}
             initialChatId={deepChat}
             onFullScreen={setFullChat}
+            onOpenNotifications={() => setTab("notifications")}
           />
         )}
         {tab === "discover" && (
@@ -3233,6 +3289,22 @@ function AppShell({ user }: { user: any }) {
             onNavigate={(type, id) => {
               if (type === "profile") {
                 setProfileId(id);
+                setTab("profile");
+              } else if (type === "chat") {
+                setDeepChat(id);
+                setTab("chat");
+              } else if (type === "project") {
+                setProjectId(id);
+              }
+            }}
+          />
+        )}
+        {tab === "notifications" && (
+          <NotificationsView
+            onBack={() => setTab("chat")}
+            onNavigate={(type, id) => {
+              if (type === "profile") {
+                setProfileId(id === user.id ? null : id);
                 setTab("profile");
               } else if (type === "chat") {
                 setDeepChat(id);

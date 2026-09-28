@@ -274,8 +274,8 @@ function Dashboard() {
     content.data?.find(item => item.key === key)?.value ??
     fallback;
   return (
-    <div className="min-h-screen bg-background page-grid">
-      <header className="border-b bg-card/80">
+    <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-background page-grid">
+      <header className="shrink-0 border-b bg-card/80">
         <div className="container flex h-16 items-center gap-3">
           <button
             className="rounded-xl p-2 hover:bg-muted"
@@ -298,7 +298,7 @@ function Dashboard() {
           </span>
         </div>
       </header>
-      <main className="container py-8">
+      <main className="container min-h-0 flex-1 overflow-y-auto overscroll-contain py-8">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: "Users", value: stats.data?.users, icon: Users },

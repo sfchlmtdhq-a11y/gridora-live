@@ -153,6 +153,12 @@ describe("Gridora public procedures", () => {
     await expect(
       caller.connections.respond({ requestId: 1, action: "accept" })
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(caller.connections.remove({ userId: 2 })).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    await expect(caller.connections.restore({ userId: 2 })).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
   });
 
   it("keeps chat history search and deletion gated for signed-out visitors", async () => {

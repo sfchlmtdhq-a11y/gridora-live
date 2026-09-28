@@ -11,6 +11,7 @@ import {
   gridoraAiMessages,
   gridoraAiProfiles,
   gridoraAiThreads,
+  hiddenContacts,
   messages,
   notifications,
   portfolioProjects,
@@ -125,6 +126,12 @@ export async function eraseGridoraAccountData(
   );
   await tx.delete(userBlocks).where(
     or(eq(userBlocks.userId, userId), eq(userBlocks.blockedUserId, userId))
+  );
+  await tx.delete(hiddenContacts).where(
+    or(
+      eq(hiddenContacts.userId, userId),
+      eq(hiddenContacts.hiddenUserId, userId)
+    )
   );
   await tx.delete(projectRequests).where(
     or(
