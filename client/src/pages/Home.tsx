@@ -1,6 +1,16 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useTheme } from "@/contexts/ThemeContext";
 import { trpc } from "@/lib/trpc";
 import {
@@ -11,6 +21,11 @@ import {
 } from "@/lib/contact-display";
 import { formatPresence } from "@shared/presence-display";
 import { statusSwipeDirection } from "@shared/status-stories";
+import {
+  isReplySwipe,
+  MESSAGE_TAP_BURST_MS,
+  messageTapAction,
+} from "@shared/message-gestures";
 import { advanceAdminShortcutTap } from "@/lib/admin-shortcut";
 import { shouldRenderPublicFooter } from "@/lib/public-footer";
 import { Streamdown } from "streamdown";
@@ -46,6 +61,7 @@ import {
   Paperclip,
   Plus,
   Search,
+  Send,
   Settings,
   Sparkles,
   Star,
@@ -780,6 +796,8 @@ function ChatView({
   const [replyTo, setReplyTo] = useState<any>(null);
   const [editingMessage, setEditingMessage] = useState<any>(null);
   const [viewOnce, setViewOnce] = useState(false);
+  const [reactionMenuId, setReactionMenuId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<any>(null);
   const [attachment, setAttachment] = useState<{
     dataUrl: string;
     name: string;
@@ -788,6 +806,14 @@ function ChatView({
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [viewerCanDownload, setViewerCanDownload] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
+  const tapTracker = useRef<{
+    messageId: number;
+    count: number;
+    lastAt: number;
+    timer?: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  const swipeTracker = useRef<{ messageId: number; startX: number; startY: number } | null>(null);
+  const suppressTapUntil = useRef(0);
   const chats = trpc.chats.list.useQuery(undefined, {
     retry: false,
     refetchInterval: 5000,
@@ -839,8 +865,19 @@ function ChatView({
     onError: e => toast.error(e.message),
   });
   const remove = trpc.chats.delete.useMutation({
-    onSuccess: () => messages.refetch(),
+    onSuccess: async result => {
+      setDeleteTarget(null);
+      toast.success(result.scope === "everyone" ? "Message deleted for everyone" : "Message deleted for you");
+      await messages.refetch();
+    },
     onError: e => toast.error(e.message),
+  });
+  const react = trpc.chats.react.useMutation({
+    onSuccess: async () => {
+      setReactionMenuId(null);
+      await messages.refetch();
+    },
+    onError: error => toast.error(error.message),
   });
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -858,7 +895,7 @@ function ChatView({
   };
   const active = chats.data?.find(chat => chat.id === activeChat);
   const partner = active?.partner;
-  const emojis = ["😀", "😂", "❤️", "👍", "😮", "😢", "🙏", "✨"];
+  const emojis = ["😀", "😂", "❤️", "👍", "😮", "😢", "🙏", "✨"] as const;
   const sendMessage = (event: FormEvent) => {
     event.preventDefault();
     if (!body.trim() && !attachment)
@@ -874,6 +911,56 @@ function ChatView({
       viewOnce: viewOnce && Boolean(attachment),
       attachment,
     });
+  };
+  const handleMessageTap = (message: any) => {
+    if (Date.now() < suppressTapUntil.current) return;
+    const now = Date.now();
+    const previous = tapTracker.current;
+    const sameBurst = previous && previous.messageId === message.id && now - previous.lastAt < MESSAGE_TAP_BURST_MS;
+    if (previous?.timer) clearTimeout(previous.timer);
+    const count = sameBurst
+      ? previous.count + 1
+      : 1;
+    tapTracker.current = { messageId: message.id, count, lastAt: now };
+    const action = messageTapAction(count, message.senderId === user.id && !message.deletedAt);
+    if (action === "reaction") setReactionMenuId(message.id);
+    if (count === 2)
+      setReactionMenuId(current => current === message.id ? null : message.id);
+    if (action === "edit") {
+      const pending = tapTracker.current;
+      pending.timer = setTimeout(() => {
+        if (tapTracker.current !== pending) return;
+        pending.timer = undefined;
+        setReactionMenuId(null);
+        setEditingMessage(message);
+        setReplyTo(null);
+        setBody(message.body);
+      }, 450);
+      return;
+    }
+    if (action === "delete") {
+      if (tapTracker.current.timer) clearTimeout(tapTracker.current.timer);
+      tapTracker.current = null;
+      setReactionMenuId(null);
+      setEditingMessage(null);
+      setBody("");
+      setDeleteTarget(message);
+    }
+  };
+  const handleMessageTouchEnd = (event: React.TouchEvent, message: any) => {
+    const start = swipeTracker.current;
+    swipeTracker.current = null;
+    const touch = event.changedTouches[0];
+    if (!start || !touch || start.messageId !== message.id) return;
+    const deltaX = touch.clientX - start.startX;
+    const deltaY = touch.clientY - start.startY;
+    if (isReplySwipe(deltaX, deltaY)) {
+      suppressTapUntil.current = Date.now() + 700;
+      setReactionMenuId(null);
+      setReplyTo(message);
+      setEditingMessage(null);
+      setBody("");
+    }
   };
   const conversation = activeChat ? (
     <section className="flex min-h-0 flex-1 flex-col bg-background">
@@ -1004,11 +1091,29 @@ function ChatView({
                 >
                   <div
                     className={`relative max-w-[min(82%,38rem)] rounded-2xl px-4 py-3 text-sm ${message.senderId === user.id ? "rounded-br-md bg-primary text-primary-foreground" : "rounded-bl-md bg-card shadow-sm"}`}
+                    onClick={() => handleMessageTap(message)}
+                    onTouchStart={event => {
+                      const touch = event.touches[0];
+                      if (touch)
+                        swipeTracker.current = {
+                          messageId: message.id,
+                          startX: touch.clientX,
+                          startY: touch.clientY,
+                        };
+                    }}
+                    onTouchEnd={event => handleMessageTouchEnd(event, message)}
+                    onTouchCancel={() => { swipeTracker.current = null; }}
+                    title="Tap for reactions · swipe to reply · triple tap your message to edit · four taps to delete"
                   >
-                    <div className="mb-1 hidden gap-1 group-hover:flex">
+                    <div className="mb-1 hidden gap-1 group-hover:flex" onClick={event => event.stopPropagation()}>
                       <button
                         className="text-[10px] opacity-70"
-                        onClick={() => setReplyTo(message)}
+                        onClick={() => {
+                          setReactionMenuId(null);
+                          setReplyTo(message);
+                          setEditingMessage(null);
+                          setBody("");
+                        }}
                       >
                         Reply
                       </button>
@@ -1025,6 +1130,8 @@ function ChatView({
                         <button
                           className="text-[10px] opacity-70"
                           onClick={() => {
+                            setReactionMenuId(null);
+                            setReplyTo(null);
                             setEditingMessage(message);
                             setBody(message.body);
                           }}
@@ -1035,9 +1142,10 @@ function ChatView({
                       {message.senderId === user.id && (
                         <button
                           className="text-[10px] opacity-70"
-                          onClick={() =>
-                            remove.mutate({ messageId: message.id })
-                          }
+                          onClick={() => {
+                            setReactionMenuId(null);
+                            setDeleteTarget(message);
+                          }}
                         >
                           Delete
                         </button>
@@ -1090,6 +1198,52 @@ function ChatView({
                       <span className="mr-2 text-[10px] opacity-60">
                         edited
                       </span>
+                    )}
+                    {message.reactions?.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1" onClick={event => event.stopPropagation()}>
+                        {message.reactions.map((reaction: any) => (
+                          <button
+                            key={reaction.emoji}
+                            type="button"
+                            className={`rounded-full border px-2 py-0.5 text-xs ${reaction.reactedByMe ? "border-primary bg-primary/15" : "border-border/70 bg-background/40"}`}
+                            aria-label={`${reaction.emoji}, ${reaction.count} reactions`}
+                            onClick={() => react.mutate({ messageId: message.id, emoji: reaction.emoji })}
+                          >
+                            {reaction.emoji} {reaction.count}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {reactionMenuId === message.id && !message.deletedAt && (
+                      <div
+                        className="mt-2 flex flex-wrap items-center gap-1 rounded-xl border border-border/50 bg-background/60 p-1"
+                        onClick={event => event.stopPropagation()}
+                      >
+                        {emojis.map(emoji => (
+                          <button
+                            key={emoji}
+                            type="button"
+                            className="grid h-8 w-8 place-items-center rounded-lg text-base hover:bg-muted"
+                            aria-label={`React with ${emoji}`}
+                            disabled={react.isPending}
+                            onClick={() => react.mutate({ messageId: message.id, emoji })}
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          className="rounded-lg px-2 py-1 text-xs font-semibold hover:bg-muted"
+                          onClick={() => {
+                            setReplyTo(message);
+                            setEditingMessage(null);
+                            setBody("");
+                            setReactionMenuId(null);
+                          }}
+                        >
+                          Reply
+                        </button>
+                      </div>
                     )}
                     <p className="mt-1 text-right text-[10px] opacity-60">
                       {new Date(message.createdAt).toLocaleTimeString([], {
@@ -1326,7 +1480,42 @@ function ChatView({
       </section>
     </>
   );
-  return <div className="flex min-h-0 flex-1">{conversation}</div>;
+  return (
+    <>
+      <div className="flex min-h-0 flex-1">{conversation}</div>
+      <AlertDialog open={Boolean(deleteTarget)} onOpenChange={open => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this message?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget?.senderId === user.id
+                ? "Choose whether to hide it only for you or remove it from the conversation for everyone."
+                : "This will hide the message only for you. Only its sender can delete it for everyone."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-secondary text-secondary-foreground hover:bg-secondary/80"
+              onClick={() => remove.mutate({ messageId: deleteTarget.id, scope: "me" })}
+              disabled={remove.isPending}
+            >
+              Delete for me
+            </AlertDialogAction>
+            {deleteTarget?.senderId === user.id && !deleteTarget?.deletedAt && (
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={() => remove.mutate({ messageId: deleteTarget.id, scope: "everyone" })}
+                disabled={remove.isPending}
+              >
+                Delete for everyone
+              </AlertDialogAction>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
 }
 
 function ConnectionButton({ userId }: { userId: number }) {
@@ -1485,7 +1674,7 @@ function DiscoverView({
           >
             <X />
           </button>
-          <div className="w-full max-w-xl text-center text-white" style={{ touchAction: "pan-y" }}>
+          <div className="max-h-[90dvh] w-full max-w-xl overflow-y-auto text-center text-white" style={{ touchAction: "pan-y" }}>
             <div className="mb-3 flex items-center justify-center gap-2 text-sm font-semibold">
               <Avatar
                 name={statuses.data?.find((item: any) => item.id === viewedStatus.id)?.author?.name}
@@ -1503,15 +1692,18 @@ function DiscoverView({
             )}
             <p className="mt-4 text-lg">{viewedStatus.body}</p>
             {viewedStatus.ownerId !== user.id && (
-              <Button
-                className="mt-4 rounded-xl"
-                variant={viewedStatus.likedByViewer ? "secondary" : "default"}
-                disabled={likeStatus.isPending}
-                onClick={() => likeStatus.mutate({ statusId: viewedStatus.id })}
-              >
-                <Heart size={16} className={viewedStatus.likedByViewer ? "fill-current" : ""} />
-                {viewedStatus.likedByViewer ? "Unlike status" : "Like status"}
-              </Button>
+              <>
+                <Button
+                  className="mt-4 rounded-xl"
+                  variant={viewedStatus.likedByViewer ? "secondary" : "default"}
+                  disabled={likeStatus.isPending}
+                  onClick={() => likeStatus.mutate({ statusId: viewedStatus.id })}
+                >
+                  <Heart size={16} className={viewedStatus.likedByViewer ? "fill-current" : ""} />
+                  {viewedStatus.likedByViewer ? "Unlike status" : "Like status"}
+                </Button>
+                <StatusReplyComposer statusId={viewedStatus.id} />
+              </>
             )}
             {(() => {
               const items = (statuses.data || []).filter(
@@ -1548,7 +1740,7 @@ function DiscoverView({
           </div>
         </div>
       )}
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+      <div className="flex flex-col gap-4">
         <div>
           <p className="text-xs font-bold uppercase tracking-[.2em] text-primary">
             Contacts
@@ -1560,33 +1752,6 @@ function DiscoverView({
             Connect with people, see your accepted contacts, and manage your list.
           </p>
         </div>
-        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
-          <div className="relative min-w-0 flex-1 sm:w-72">
-            <Search
-              className="absolute left-3 top-3 text-muted-foreground"
-              size={17}
-            />
-            <Input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="h-11 rounded-xl bg-card pl-10"
-              placeholder="Search contacts"
-              aria-label="Search contacts by name, username, email, or phone"
-            />
-          </div>
-          <select
-            value={sortBy}
-            onChange={event => setSortBy(event.target.value as ContactSort)}
-            className="h-11 w-full rounded-xl border bg-card px-3 text-sm sm:w-48"
-            aria-label="Sort contacts"
-          >
-            <option value="connections">Connected first</option>
-            <option value="name-asc">Name: A to Z</option>
-            <option value="name-desc">Name: Z to A</option>
-            <option value="rating">Highest rated</option>
-          </select>
-        </div>
-      </div>
       <section className="mt-5 max-w-3xl rounded-2xl border bg-card p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
@@ -1707,6 +1872,33 @@ function DiscoverView({
           </form>
         )}
       </section>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          <div className="relative min-w-0 flex-1 sm:w-72">
+            <Search
+              className="absolute left-3 top-3 text-muted-foreground"
+              size={17}
+            />
+            <Input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="h-11 rounded-xl bg-card pl-10"
+              placeholder="Search contacts"
+              aria-label="Search contacts by name, username, email, or phone"
+            />
+          </div>
+          <select
+            value={sortBy}
+            onChange={event => setSortBy(event.target.value as ContactSort)}
+            className="h-11 w-full rounded-xl border bg-card px-3 text-sm sm:w-48"
+            aria-label="Sort contacts"
+          >
+            <option value="connections">Connected first</option>
+            <option value="name-asc">Name: A to Z</option>
+            <option value="name-desc">Name: Z to A</option>
+            <option value="rating">Highest rated</option>
+          </select>
+        </div>
+      </div>
       <div className="mt-4 flex max-w-3xl justify-end">
         <button
           type="button"
@@ -1815,6 +2007,82 @@ function DiscoverView({
         )}
       </div>
     </div>
+  );
+}
+
+function StatusReplyComposer({ statusId }: { statusId: number }) {
+  const emojis = ["😀", "😂", "❤️", "👍", "😮", "😢", "🙏", "✨"] as const;
+  const [body, setBody] = useState("");
+  const [emoji, setEmoji] = useState<(typeof emojis)[number] | undefined>();
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const utils = trpc.useUtils();
+  const reply = trpc.statuses.reply.useMutation({
+    onSuccess: async () => {
+      toast.success("Status reply sent as a direct message");
+      setBody("");
+      setEmoji(undefined);
+      setPickerOpen(false);
+      await utils.chats.list.invalidate();
+    },
+    onError: error => toast.error(error.message),
+  });
+  return (
+    <form
+      className="relative mx-auto mt-4 w-full max-w-xl"
+      onTouchStart={event => event.stopPropagation()}
+      onTouchEnd={event => event.stopPropagation()}
+      onSubmit={event => {
+        event.preventDefault();
+        if (!body.trim() && !emoji) return;
+        reply.mutate({ statusId, body: body.trim() || undefined, emoji });
+      }}
+    >
+      {pickerOpen && (
+        <div className="absolute bottom-14 left-0 z-10 grid grid-cols-8 gap-1 rounded-2xl border border-white/20 bg-black/80 p-2 shadow-2xl">
+          {emojis.map(item => (
+            <button
+              type="button"
+              key={item}
+              className="rounded-lg p-2 text-xl hover:bg-white/15"
+              aria-label={`Reply with ${item}`}
+              onClick={() => {
+                setEmoji(item);
+                setPickerOpen(false);
+              }}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="flex min-w-0 items-center gap-2 rounded-2xl border border-white/20 bg-black/55 p-2">
+        <button
+          type="button"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-xl text-xl hover:bg-white/10"
+          aria-label="Choose an emoji reply"
+          onClick={() => setPickerOpen(value => !value)}
+        >
+          {emoji || "😊"}
+        </button>
+        <Input
+          value={body}
+          onChange={event => setBody(event.target.value)}
+          maxLength={1000}
+          placeholder="Reply to this status…"
+          className="h-10 min-w-0 border-0 bg-white/10 text-white placeholder:text-white/60"
+          aria-label="Status direct message reply"
+        />
+        <Button
+          type="submit"
+          size="icon"
+          className="h-10 w-10 shrink-0 rounded-xl"
+          disabled={reply.isPending || (!body.trim() && !emoji)}
+          aria-label="Send status reply"
+        >
+          {reply.isPending ? <Loader2 className="animate-spin" size={17} /> : <Send size={17} />}
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -2131,7 +2399,7 @@ function ProfileView({
           >
             <X />
           </button>
-          <div className="max-w-xl text-center text-white" style={{ touchAction: "pan-y" }}>
+          <div className="max-h-[90dvh] max-w-xl overflow-y-auto text-center text-white" style={{ touchAction: "pan-y" }}>
             {statusViewer.imageUrl && (
               <img
                 src={statusViewer.imageUrl}
@@ -2141,14 +2409,17 @@ function ProfileView({
             )}
             <p className="mt-4 text-lg">{statusViewer.body}</p>
             {statusViewer.ownerId !== user.id && (
-              <Button
-                className="mt-4 rounded-xl"
-                variant={statusViewer.likedByViewer ? "secondary" : "default"}
-                onClick={() => likeStatus.mutate({ statusId: statusViewer.id })}
-              >
-                <Heart size={16} className={statusViewer.likedByViewer ? "fill-current" : ""} />
-                {statusViewer.likedByViewer ? "Unlike status" : "Like status"}
-              </Button>
+              <>
+                <Button
+                  className="mt-4 rounded-xl"
+                  variant={statusViewer.likedByViewer ? "secondary" : "default"}
+                  onClick={() => likeStatus.mutate({ statusId: statusViewer.id })}
+                >
+                  <Heart size={16} className={statusViewer.likedByViewer ? "fill-current" : ""} />
+                  {statusViewer.likedByViewer ? "Unlike status" : "Like status"}
+                </Button>
+                <StatusReplyComposer statusId={statusViewer.id} />
+              </>
             )}
             {statusViewer.canSeeStats && (
               <div className="mt-4 max-h-[24dvh] overflow-y-auto rounded-2xl bg-white/10 p-3 text-left text-xs text-white/90">

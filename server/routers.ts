@@ -10,6 +10,7 @@ import {
   asc,
   desc,
   eq,
+  gte,
   gt,
   inArray,
   isNull,
@@ -42,6 +43,8 @@ import {
   gridoraAiProfiles,
   gridoraAiThreads,
   hiddenContacts,
+  messageHides,
+  messageReactions,
   siteContent,
   portfolioProjects,
   postLikes,
@@ -70,6 +73,10 @@ import { storagePut } from "./storage";
 import { gridoraAIRouter } from "./gridoraAIRouter";
 import { isFirstRegisteredAccount } from "./gridoraAI";
 import { getStatusExpiry } from "../shared/status-stories";
+import {
+  MESSAGE_NOTIFICATION_WINDOW_MS,
+  shouldNotifyMessageBurst,
+} from "../shared/message-bursts";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -170,13 +177,54 @@ const notify = async (
   kind: string,
   body: string,
   targetType?: string,
-  targetId?: number
+  targetId?: number,
+  actorId?: number
 ) => {
   const db = await getDb();
   if (db)
     await db
       .insert(notifications)
-      .values({ userId, kind, body, targetType, targetId });
+      .values({ userId, kind, body, targetType, targetId, actorId });
+};
+const notifyMessageBurst = async (
+  db: any,
+  input: { chatId: number; senderId: number; senderName: string | null; recipientId: number }
+) => {
+  const since = new Date(Date.now() - MESSAGE_NOTIFICATION_WINDOW_MS);
+  const recentMessages = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.chatId, input.chatId),
+        eq(messages.senderId, input.senderId),
+        gte(messages.createdAt, since)
+      )
+    )
+    .limit(3);
+  const priorBurstNotice = await db
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.userId, input.recipientId),
+        eq(notifications.kind, "message"),
+        eq(notifications.actorId, input.senderId),
+        eq(notifications.targetType, "chat"),
+        eq(notifications.targetId, input.chatId),
+        gte(notifications.createdAt, since)
+      )
+    )
+    .limit(1);
+  if (shouldNotifyMessageBurst(recentMessages.length, priorBurstNotice.length > 0))
+    await notify(
+      input.recipientId,
+      "message",
+      `${input.senderName ?? "A connection"} sent you several messages`,
+      "chat",
+      input.chatId,
+      input.senderId
+    );
 };
 const readCookie = (req: any, name: string) =>
   (req.headers.cookie ?? "")
@@ -1393,18 +1441,69 @@ export const appRouter = router({
           )
           .orderBy(asc(messages.createdAt))
           .limit(200);
-        return rows.map(row =>
-          row.deletedAt
-            ? {
-                ...row,
-                body: "This message has been deleted",
-                attachmentUrl: null,
-                attachmentName: null,
-              }
-            : row.viewOnce && row.viewedAt
-              ? { ...row, attachmentUrl: null, body: "Opened" }
-              : row
-        );
+        const messageIds = rows.map(row => row.id);
+        const [hiddenRows, reactionRows] = messageIds.length
+          ? await Promise.all([
+              db
+                .select({ messageId: messageHides.messageId })
+                .from(messageHides)
+                .where(
+                  and(
+                    eq(messageHides.userId, user.id),
+                    inArray(messageHides.messageId, messageIds)
+                  )
+                ),
+              db
+                .select({
+                  messageId: messageReactions.messageId,
+                  userId: messageReactions.userId,
+                  emoji: messageReactions.emoji,
+                })
+                .from(messageReactions)
+                .where(inArray(messageReactions.messageId, messageIds)),
+            ])
+          : [[], []];
+        const hiddenIds = new Set(hiddenRows.map((row: any) => row.messageId));
+        const groupedReactions = new Map<
+          number,
+          Map<string, { count: number; reactedByMe: boolean }>
+        >();
+        for (const reaction of reactionRows as Array<{
+          messageId: number;
+          userId: number;
+          emoji: string;
+        }>) {
+          const byEmoji = groupedReactions.get(reaction.messageId) || new Map();
+          const aggregate = byEmoji.get(reaction.emoji) || {
+            count: 0,
+            reactedByMe: false,
+          };
+          aggregate.count += 1;
+          aggregate.reactedByMe ||= reaction.userId === user.id;
+          byEmoji.set(reaction.emoji, aggregate);
+          groupedReactions.set(reaction.messageId, byEmoji);
+        }
+        return rows
+          .filter(row => !hiddenIds.has(row.id))
+          .map(row => {
+            const reactions = row.deletedAt
+              ? []
+              : Array.from(groupedReactions.get(row.id)?.entries() || []).map(
+                  ([emoji, value]) => ({ emoji, ...value })
+                );
+            return row.deletedAt
+              ? {
+                  ...row,
+                  body: "This message has been deleted",
+                  attachmentUrl: null,
+                  attachmentName: null,
+                  attachmentType: null,
+                  reactions,
+                }
+              : row.viewOnce && row.viewedAt
+                ? { ...row, attachmentUrl: null, body: "Opened", reactions }
+                : { ...row, reactions };
+          });
       }),
     send: protectedProcedure
       .input(
@@ -1466,6 +1565,24 @@ export const appRouter = router({
               message: "This conversation is unavailable",
             });
         }
+        if (input.replyToId) {
+          const replyTarget = await db
+            .select({ id: messages.id })
+            .from(messages)
+            .where(
+              and(
+                eq(messages.id, input.replyToId),
+                eq(messages.chatId, input.chatId),
+                isNull(messages.deletedAt)
+              )
+            )
+            .limit(1);
+          if (!replyTarget.length)
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "That message can no longer be replied to",
+            });
+        }
         let attachmentUrl: string | undefined;
         if (input.attachment) {
           if (
@@ -1515,13 +1632,12 @@ export const appRouter = router({
               .limit(1)
           )[0];
           if (recipient)
-            await notify(
-              recipient.userId,
-              "message",
-              `${user.name ?? "A connection"} sent you a message`,
-              "chat",
-              input.chatId
-            );
+            await notifyMessageBurst(db, {
+              recipientId: recipient.userId,
+              senderId: user.id,
+              senderName: user.name,
+              chatId: input.chatId,
+            });
         }
         return {
           id: Number(result[0].insertId),
@@ -1599,6 +1715,17 @@ export const appRouter = router({
             .limit(1)
         )[0];
         if (!message) throw new TRPCError({ code: "FORBIDDEN" });
+        const member = await db
+          .select({ id: chatMembers.id })
+          .from(chatMembers)
+          .where(
+            and(
+              eq(chatMembers.chatId, message.chatId),
+              eq(chatMembers.userId, user.id)
+            )
+          )
+          .limit(1);
+        if (!member.length) throw new TRPCError({ code: "FORBIDDEN" });
         await db
           .update(messages)
           .set({ body: input.body, editedAt: new Date() })
@@ -1606,7 +1733,12 @@ export const appRouter = router({
         return { success: true };
       }),
     delete: protectedProcedure
-      .input(z.object({ messageId: z.number() }))
+      .input(
+        z.object({
+          messageId: z.number(),
+          scope: z.enum(["me", "everyone"]).default("me"),
+        })
+      )
       .mutation(async ({ input, ctx }) => {
         const db = await getDb();
         const user = requireUser(ctx.user);
@@ -1618,7 +1750,6 @@ export const appRouter = router({
             .where(
               and(
                 eq(messages.id, input.messageId),
-                eq(messages.senderId, user.id),
                 isNull(messages.deletedAt)
               )
             )
@@ -1626,14 +1757,134 @@ export const appRouter = router({
         )[0];
         if (!message)
           throw new TRPCError({
-            code: "FORBIDDEN",
-            message: "You can only delete your own messages",
+            code: "NOT_FOUND",
+            message: "Message not found",
           });
+        const member = await db
+          .select({ id: chatMembers.id })
+          .from(chatMembers)
+          .where(
+            and(
+              eq(chatMembers.chatId, message.chatId),
+              eq(chatMembers.userId, user.id)
+            )
+          )
+          .limit(1);
+        if (!member.length) throw new TRPCError({ code: "FORBIDDEN" });
+        if (input.scope === "everyone") {
+          if (message.senderId !== user.id)
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: "You can only delete your own message for everyone",
+            });
+          await db
+            .update(messages)
+            .set({
+              deletedAt: new Date(),
+              body: "This message has been deleted",
+              attachmentUrl: null,
+              attachmentName: null,
+              attachmentType: null,
+            })
+            .where(eq(messages.id, input.messageId));
+          await db
+            .delete(messageReactions)
+            .where(eq(messageReactions.messageId, input.messageId));
+          return { success: true, scope: "everyone" as const };
+        }
         await db
-          .update(messages)
-          .set({ deletedAt: new Date(), body: "This message was deleted" })
-          .where(eq(messages.id, input.messageId));
-        return { success: true };
+          .insert(messageHides)
+          .values({ messageId: input.messageId, userId: user.id })
+          .onDuplicateKeyUpdate({ set: { userId: user.id } });
+        return { success: true, scope: "me" as const };
+      }),
+    react: protectedProcedure
+      .input(
+        z.object({
+          messageId: z.number().int().positive(),
+          emoji: z.enum(["😀", "😂", "❤️", "👍", "😮", "😢", "🙏", "✨"]),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const db = await getDb();
+        const user = requireUser(ctx.user);
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        const message = (
+          await db
+            .select()
+            .from(messages)
+            .where(and(eq(messages.id, input.messageId), isNull(messages.deletedAt)))
+            .limit(1)
+        )[0];
+        if (!message)
+          throw new TRPCError({ code: "NOT_FOUND", message: "Message not found" });
+        const member = await db
+          .select({ id: chatMembers.id })
+          .from(chatMembers)
+          .where(
+            and(
+              eq(chatMembers.chatId, message.chatId),
+              eq(chatMembers.userId, user.id)
+            )
+          )
+          .limit(1);
+        if (!member.length) throw new TRPCError({ code: "FORBIDDEN" });
+        const chat = (
+          await db
+            .select()
+            .from(chats)
+            .where(eq(chats.id, message.chatId))
+            .limit(1)
+        )[0];
+        if (chat?.adminOnly && user.role !== "admin")
+          throw new TRPCError({ code: "FORBIDDEN" });
+        if (chat && !chat.isCommunity && !chat.adminOnly) {
+          const other = (
+            await db
+              .select({ userId: chatMembers.userId })
+              .from(chatMembers)
+              .where(
+                and(
+                  eq(chatMembers.chatId, message.chatId),
+                  ne(chatMembers.userId, user.id)
+                )
+              )
+              .limit(1)
+          )[0];
+          if (other && (await areUsersBlocked(db, user.id, other.userId)))
+            throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        const prior = (
+          await db
+            .select()
+            .from(messageReactions)
+            .where(
+              and(
+                eq(messageReactions.messageId, input.messageId),
+                eq(messageReactions.userId, user.id)
+              )
+            )
+            .limit(1)
+        )[0];
+        if (prior?.emoji === input.emoji) {
+          await db
+            .delete(messageReactions)
+            .where(eq(messageReactions.id, prior.id));
+          return { success: true, removed: true };
+        }
+        if (prior) {
+          await db
+            .update(messageReactions)
+            .set({ emoji: input.emoji })
+            .where(eq(messageReactions.id, prior.id));
+        } else {
+          await db.insert(messageReactions).values({
+            messageId: input.messageId,
+            userId: user.id,
+            emoji: input.emoji,
+          });
+        }
+        return { success: true, removed: false };
       }),
   }),
   posts: router({
@@ -2077,6 +2328,122 @@ export const appRouter = router({
           expiresAt: getStatusExpiry(),
         });
         return { id: Number(result[0].insertId) };
+      }),
+    reply: protectedProcedure
+      .input(
+        z
+          .object({
+            statusId: z.number().int().positive(),
+            body: z.string().trim().max(1000).optional(),
+            emoji: z.enum(["😀", "😂", "❤️", "👍", "😮", "😢", "🙏", "✨"]).optional(),
+          })
+          .refine(input => Boolean(input.body?.trim() || input.emoji), {
+            message: "Write a reply or choose an emoji",
+          })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        const user = requireUser(ctx.user);
+        if (!db) throw new TRPCError({ code: "PRECONDITION_FAILED" });
+        const status = (
+          await db
+            .select()
+            .from(statuses)
+            .where(
+              and(
+                eq(statuses.id, input.statusId),
+                gt(statuses.expiresAt, new Date())
+              )
+            )
+            .limit(1)
+        )[0];
+        if (!status || status.userId === user.id)
+          throw new TRPCError({ code: "NOT_FOUND", message: "Status unavailable" });
+        if (await areUsersBlocked(db, user.id, status.userId))
+          throw new TRPCError({ code: "FORBIDDEN", message: "This status is unavailable" });
+        const connection = await db
+          .select({ id: connectionRequests.id })
+          .from(connectionRequests)
+          .where(
+            and(
+              eq(connectionRequests.status, "accepted"),
+              or(
+                and(
+                  eq(connectionRequests.senderId, user.id),
+                  eq(connectionRequests.receiverId, status.userId)
+                ),
+                and(
+                  eq(connectionRequests.senderId, status.userId),
+                  eq(connectionRequests.receiverId, user.id)
+                )
+              )
+            )
+          )
+          .limit(1);
+        if (!connection.length)
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You can only reply to a connected contact's status",
+          });
+        const candidates = await db
+          .select({ chat: chats })
+          .from(chatMembers)
+          .innerJoin(chats, eq(chats.id, chatMembers.chatId))
+          .where(
+            and(
+              eq(chatMembers.userId, user.id),
+              eq(chats.isCommunity, false),
+              eq(chats.adminOnly, false)
+            )
+          );
+        let chat = undefined as (typeof chats.$inferSelect) | undefined;
+        for (const candidate of candidates) {
+          const candidateMembers = await db
+            .select({ userId: chatMembers.userId })
+            .from(chatMembers)
+            .where(eq(chatMembers.chatId, candidate.chat.id));
+          if (
+            candidateMembers.length === 2 &&
+            candidateMembers.some(member => member.userId === user.id) &&
+            candidateMembers.some(member => member.userId === status.userId)
+          ) {
+            chat = candidate.chat;
+            break;
+          }
+        }
+        if (!chat) {
+          const created = await db.insert(chats).values({
+            title: `${user.name ?? "Connection"} & ${status.userId}`,
+            isCommunity: false,
+          });
+          const chatId = Number(created[0].insertId);
+          await db.insert(chatMembers).values([
+            { chatId, userId: user.id },
+            { chatId, userId: status.userId },
+          ]);
+          chat = (
+            await db.select().from(chats).where(eq(chats.id, chatId)).limit(1)
+          )[0];
+        }
+        const response = [input.emoji, input.body?.trim()]
+          .filter(Boolean)
+          .join(" ");
+        const statusContext = status.body.trim()
+          ? status.body.trim().slice(0, 120)
+          : "a photo";
+        const body = `Replying to your status: ${statusContext}\n\n${response}`;
+        const inserted = await db.insert(messages).values({
+          chatId: chat.id,
+          senderId: user.id,
+          body,
+        });
+        await notifyMessageBurst(db, {
+          recipientId: status.userId,
+          senderId: user.id,
+          senderName: user.name,
+          chatId: chat.id,
+        });
+        return { success: true, chatId: chat.id, messageId: Number(inserted[0].insertId) };
       }),
     view: protectedProcedure
       .input(z.object({ statusId: z.number() }))

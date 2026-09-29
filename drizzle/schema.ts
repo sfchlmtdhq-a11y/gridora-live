@@ -141,6 +141,40 @@ export const messages = mysqlTable(
     chatIdx: index("messages_chat_idx").on(table.chatId, table.createdAt),
   })
 );
+export const messageHides = mysqlTable(
+  "message_hides",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    messageId: int("messageId").notNull(),
+    userId: int("userId").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    messageUserIdx: uniqueIndex("message_hide_user_idx").on(
+      table.messageId,
+      table.userId
+    ),
+    userIdx: index("message_hide_user_lookup_idx").on(table.userId),
+  })
+);
+export const messageReactions = mysqlTable(
+  "message_reactions",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    messageId: int("messageId").notNull(),
+    userId: int("userId").notNull(),
+    emoji: varchar("emoji", { length: 16 }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  table => ({
+    messageUserIdx: uniqueIndex("message_reaction_user_idx").on(
+      table.messageId,
+      table.userId
+    ),
+    messageIdx: index("message_reaction_message_idx").on(table.messageId),
+    userIdx: index("message_reaction_user_lookup_idx").on(table.userId),
+  })
+);
 export const portfolioProjects = mysqlTable(
   "portfolio_projects",
   {
@@ -216,6 +250,7 @@ export const notifications = mysqlTable(
     id: int("id").autoincrement().primaryKey(),
     userId: int("userId").notNull(),
     kind: varchar("kind", { length: 48 }).notNull(),
+    actorId: int("actorId"),
     body: text("body").notNull(),
     imageUrl: text("imageUrl"),
     targetType: varchar("targetType", { length: 48 }),

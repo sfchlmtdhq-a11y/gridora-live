@@ -175,6 +175,9 @@ describe("Gridora public procedures", () => {
     await expect(caller.chats.delete({ messageId: 1 })).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
+    await expect(
+      caller.chats.react({ messageId: 1, emoji: "❤️" })
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 
   it("keeps live notifications and admin content protected", async () => {
@@ -226,6 +229,9 @@ describe("Gridora public procedures", () => {
     await expect(caller.statuses.like({ statusId: 1 })).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
+    await expect(
+      caller.statuses.reply({ statusId: 1, emoji: "✨" })
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 
   it("keeps message editing, view-once access, and admin announcements protected", async () => {

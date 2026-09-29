@@ -12,6 +12,8 @@ import {
   gridoraAiProfiles,
   gridoraAiThreads,
   hiddenContacts,
+  messageHides,
+  messageReactions,
   messages,
   notifications,
   portfolioProjects,
@@ -70,6 +72,8 @@ export async function eraseGridoraAccountData(
     .where(eq(messages.senderId, userId));
   const messageIds = ownedMessages.map((row: { id: number }) => row.id);
   if (messageIds.length) {
+    await tx.delete(messageReactions).where(inArray(messageReactions.messageId, messageIds));
+    await tx.delete(messageHides).where(inArray(messageHides.messageId, messageIds));
     await tx
       .update(messages)
       .set({ replyToId: null })
@@ -78,6 +82,8 @@ export async function eraseGridoraAccountData(
       );
     await tx.delete(messages).where(inArray(messages.id, messageIds));
   }
+  await tx.delete(messageReactions).where(eq(messageReactions.userId, userId));
+  await tx.delete(messageHides).where(eq(messageHides.userId, userId));
   const privateChats = await tx
     .select({ id: chats.id })
     .from(chatMembers)
@@ -148,6 +154,7 @@ export async function eraseGridoraAccountData(
   await tx.delete(notifications).where(
     or(
       eq(notifications.userId, userId),
+      eq(notifications.actorId, userId),
       and(
         eq(notifications.targetType, "profile"),
         eq(notifications.targetId, userId)
