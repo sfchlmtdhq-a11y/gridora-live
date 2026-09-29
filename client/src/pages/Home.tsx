@@ -6,10 +6,11 @@ import { trpc } from "@/lib/trpc";
 import {
   sortContacts,
   contactRatingStars,
-  formatLastSeen,
   isConnectedContact,
   type ContactSort,
 } from "@/lib/contact-display";
+import { formatPresence } from "@shared/presence-display";
+import { statusSwipeDirection } from "@shared/status-stories";
 import { advanceAdminShortcutTap } from "@/lib/admin-shortcut";
 import { shouldRenderPublicFooter } from "@/lib/public-footer";
 import { Streamdown } from "streamdown";
@@ -938,7 +939,7 @@ function ChatView({
             {active?.adminOnly
               ? "Official Gridora support"
               : partner
-                ? "Connected"
+                ? formatPresence(partner.isOnline, partner.lastSeenAt)
                 : "Gridora Community"}
           </p>
         </div>
@@ -1289,7 +1290,7 @@ function ChatView({
                   </div>
                   <p className="truncate text-sm text-muted-foreground">
                     {chat.partner
-                      ? formatLastSeen(chat.partner.lastSignedIn)
+                      ? formatPresence(chat.partner.isOnline, chat.partner.lastSeenAt)
                       : chat.adminOnly
                         ? "Gridora Support"
                         : "Community conversation"}
@@ -1378,20 +1379,51 @@ function ConnectionButton({ userId }: { userId: number }) {
   );
 }
 function DiscoverView({
+  user,
   onOpenProfile,
 }: {
+  user: any;
   onOpenProfile: (id: number) => void;
 }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<ContactSort>("connections");
   const [showRemoved, setShowRemoved] = useState(false);
+  const [statusComposerOpen, setStatusComposerOpen] = useState(false);
+  const [statusBody, setStatusBody] = useState("");
+  const [statusDataUrl, setStatusDataUrl] = useState("");
+  const swipeStartX = useRef<number | null>(null);
   const utils = trpc.useUtils();
   const statuses = trpc.statuses.list.useQuery(undefined, {
-    refetchInterval: 30000,
+    refetchInterval: 10000,
   });
   const [viewedStatus, setViewedStatus] = useState<any>(null);
   const viewStatus = trpc.statuses.view.useMutation({
     onSuccess: data => setViewedStatus(data),
+    onError: error => toast.error(error.message),
+  });
+  const createStatus = trpc.statuses.create.useMutation({
+    onSuccess: async () => {
+      toast.success("Status posted — it will disappear after 24 hours");
+      setStatusBody("");
+      setStatusDataUrl("");
+      setStatusComposerOpen(false);
+      await statuses.refetch();
+    },
+    onError: error => toast.error(error.message),
+  });
+  const likeStatus = trpc.statuses.like.useMutation({
+    onSuccess: async result => {
+      setViewedStatus((current: any) =>
+        current
+          ? {
+              ...current,
+              likedByViewer: result.liked,
+              likeCount: Math.max(0, (current.likeCount || 0) + (result.liked ? 1 : -1)),
+            }
+          : current
+      );
+      await statuses.refetch();
+    },
     onError: error => toast.error(error.message),
   });
   const people = trpc.discover.list.useQuery(
@@ -1423,7 +1455,29 @@ function DiscoverView({
   return (
     <div className="container py-5 lg:py-8">
       {viewedStatus && (
-        <div className="fixed inset-0 z-[90] grid place-items-center bg-black/95 p-5">
+        <div
+          className="fixed inset-0 z-[90] grid place-items-center bg-black/95 p-5"
+          onTouchStart={event => {
+            swipeStartX.current = event.touches[0]?.clientX ?? null;
+          }}
+          onTouchEnd={event => {
+            const start = swipeStartX.current;
+            swipeStartX.current = null;
+            const end = event.changedTouches[0]?.clientX;
+            if (start === null || end === undefined) return;
+            const direction = statusSwipeDirection(end - start);
+            if (!direction) return;
+            const ownerStatuses = (statuses.data || []).filter(
+              (item: any) => item.author.id === viewedStatus.ownerId
+            );
+            const currentIndex = ownerStatuses.findIndex(
+              (item: any) => item.id === viewedStatus.id
+            );
+            const nextIndex = direction === "next" ? currentIndex + 1 : currentIndex - 1;
+            if (ownerStatuses[nextIndex])
+              viewStatus.mutate({ statusId: ownerStatuses[nextIndex].id });
+          }}
+        >
           <button
             className="absolute right-4 top-4 rounded-full bg-white/10 p-3 text-white"
             onClick={() => setViewedStatus(null)}
@@ -1431,7 +1485,15 @@ function DiscoverView({
           >
             <X />
           </button>
-          <div className="max-w-xl text-center text-white">
+          <div className="w-full max-w-xl text-center text-white" style={{ touchAction: "pan-y" }}>
+            <div className="mb-3 flex items-center justify-center gap-2 text-sm font-semibold">
+              <Avatar
+                name={statuses.data?.find((item: any) => item.id === viewedStatus.id)?.author?.name}
+                avatarUrl={statuses.data?.find((item: any) => item.id === viewedStatus.id)?.author?.avatarUrl}
+                size="sm"
+              />
+              <span>{statuses.data?.find((item: any) => item.id === viewedStatus.id)?.author?.name || "Gridora member"}</span>
+            </div>
             {viewedStatus.imageUrl && (
               <img
                 src={viewedStatus.imageUrl}
@@ -1440,6 +1502,17 @@ function DiscoverView({
               />
             )}
             <p className="mt-4 text-lg">{viewedStatus.body}</p>
+            {viewedStatus.ownerId !== user.id && (
+              <Button
+                className="mt-4 rounded-xl"
+                variant={viewedStatus.likedByViewer ? "secondary" : "default"}
+                disabled={likeStatus.isPending}
+                onClick={() => likeStatus.mutate({ statusId: viewedStatus.id })}
+              >
+                <Heart size={16} className={viewedStatus.likedByViewer ? "fill-current" : ""} />
+                {viewedStatus.likedByViewer ? "Unlike status" : "Like status"}
+              </Button>
+            )}
             {(() => {
               const items = (statuses.data || []).filter(
                 (item: any) => item.author.id === viewedStatus.ownerId
@@ -1514,6 +1587,126 @@ function DiscoverView({
           </select>
         </div>
       </div>
+      <section className="mt-5 max-w-3xl rounded-2xl border bg-card p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold">24-hour statuses</h2>
+            <p className="text-xs text-muted-foreground">Stories disappear after 24 hours.</p>
+          </div>
+          {statusComposerOpen && (
+            <button
+              type="button"
+              className="rounded-lg p-2 text-muted-foreground hover:bg-muted"
+              onClick={() => {
+                setStatusComposerOpen(false);
+                setStatusBody("");
+                setStatusDataUrl("");
+              }}
+              aria-label="Close status composer"
+            >
+              <X size={17} />
+            </button>
+          )}
+        </div>
+        <div className="flex gap-4 overflow-x-auto pb-2">
+          <button
+            type="button"
+            className="flex w-16 shrink-0 flex-col items-center gap-1 text-center"
+            onClick={() => setStatusComposerOpen(value => !value)}
+            aria-label="Add a status"
+          >
+            <span className="relative rounded-full p-1 ring-2 ring-dashed ring-primary/60">
+              <Avatar name={user.name} avatarUrl={user.avatarUrl} size="md" />
+              <span className="absolute -bottom-1 -right-1 grid h-6 w-6 place-items-center rounded-full border-2 border-card bg-primary text-primary-foreground">
+                <Plus size={13} />
+              </span>
+            </span>
+            <span className="w-full truncate text-[11px] font-semibold">Your status</span>
+          </button>
+          {Array.from(
+            (statuses.data || []).reduce((grouped: Map<number, any[]>, item: any) => {
+              const group = grouped.get(item.author.id) || [];
+              group.push(item);
+              grouped.set(item.author.id, group);
+              return grouped;
+            }, new Map<number, any[]>()).entries()
+          ).filter(([ownerId]) => ownerId !== user.id).map(([ownerId, items]) => {
+            const newest = items[0];
+            return (
+              <button
+                key={ownerId}
+                type="button"
+                className="flex w-16 shrink-0 flex-col items-center gap-1 text-center"
+                onClick={() => viewStatus.mutate({ statusId: newest.id })}
+                aria-label={`View ${newest.author.name || "contact"}'s status`}
+              >
+                <span className="rounded-full p-1 ring-2 ring-primary">
+                  <Avatar name={newest.author.name} avatarUrl={newest.author.avatarUrl} size="md" />
+                </span>
+                <span className="w-full truncate text-[11px] font-semibold">{newest.author.name || "Contact"}</span>
+              </button>
+            );
+          })}
+        </div>
+        {statusComposerOpen && (
+          <form
+            className="mt-2 grid gap-2 border-t pt-3"
+            onSubmit={event => {
+              event.preventDefault();
+              if (!statusBody.trim() && !statusDataUrl) return;
+              createStatus.mutate({
+                body: statusBody.trim(),
+                imageDataUrl: statusDataUrl || undefined,
+              });
+            }}
+          >
+            <Textarea
+              value={statusBody}
+              onChange={event => setStatusBody(event.target.value)}
+              placeholder={statusDataUrl ? "Add a caption (optional)" : "Share a text status or add a photo"}
+              maxLength={1000}
+              className="min-h-20 rounded-xl"
+            />
+            {statusDataUrl && (
+              <div className="flex items-center gap-3">
+                <img src={statusDataUrl} alt="Status preview" className="h-16 w-16 rounded-xl object-cover" />
+                <span className="min-w-0 flex-1 text-xs text-muted-foreground">Photo selected. Caption is optional.</span>
+                <button type="button" className="rounded-lg p-2 hover:bg-muted" onClick={() => setStatusDataUrl("")} aria-label="Remove selected status image"><X size={16} /></button>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold hover:bg-muted">
+                <FileImage size={16} /> Add image
+                <input
+                  type="file"
+                  className="sr-only"
+                  accept="image/png,image/jpeg,image/webp"
+                  onChange={event => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    if (file.size > 8 * 1024 * 1024) {
+                      toast.error("Status images must be 8MB or smaller");
+                      event.target.value = "";
+                      return;
+                    }
+                    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) {
+                      toast.error("Choose a PNG, JPG, or WebP image");
+                      event.target.value = "";
+                      return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = () => setStatusDataUrl(String(reader.result));
+                    reader.readAsDataURL(file);
+                  }}
+                />
+              </label>
+              <Button className="rounded-xl" type="submit" disabled={createStatus.isPending || (!statusBody.trim() && !statusDataUrl)}>
+                {createStatus.isPending ? "Posting…" : "Share status"}
+              </Button>
+            </div>
+          </form>
+        )}
+      </section>
       <div className="mt-4 flex max-w-3xl justify-end">
         <button
           type="button"
@@ -1581,9 +1774,12 @@ function DiscoverView({
               ) : (
                 <>
                   {connected ? (
-                    <Button size="sm" variant="outline" className="rounded-xl" disabled>
-                      Connected
-                    </Button>
+                    <span
+                      className={`max-w-[11rem] break-words text-right text-xs font-semibold ${person.isOnline ? "text-emerald-500" : "text-muted-foreground"}`}
+                      aria-label={`Presence: ${formatPresence(person.isOnline, person.lastSeenAt)}`}
+                    >
+                      {formatPresence(person.isOnline, person.lastSeenAt)}
+                    </span>
                   ) : (
                     <ConnectionButton userId={person.id} />
                   )}
@@ -1814,32 +2010,30 @@ function ProfileView({
     coverDataUrl: "",
   });
   const statuses = trpc.statuses.list.useQuery(undefined, {
-    refetchInterval: 30000,
+    refetchInterval: 10000,
   });
-  const [statusBody, setStatusBody] = useState("");
-  const [statusDataUrl, setStatusDataUrl] = useState("");
   const [statusViewer, setStatusViewer] = useState<any>(null);
+  const statusSwipeStartX = useRef<number | null>(null);
   const statusAnalytics = trpc.statuses.viewers.useQuery(
     { statusId: statusViewer?.id || 0 },
     { enabled: Boolean(statusViewer?.canSeeStats && statusViewer?.id) }
   );
-  const createStatus = trpc.statuses.create.useMutation({
-    onSuccess: () => {
-      toast.success("Status posted for 24 hours");
-      setStatusBody("");
-      setStatusDataUrl("");
-      statuses.refetch();
-    },
-    onError: e => toast.error(e.message),
-  });
   const viewStatus = trpc.statuses.view.useMutation({
     onSuccess: data => setStatusViewer(data),
     onError: e => toast.error(e.message),
   });
   const likeStatus = trpc.statuses.like.useMutation({
-    onSuccess: () => {
-      toast.success("Status liked");
-      statuses.refetch();
+    onSuccess: async result => {
+      setStatusViewer((current: any) =>
+        current
+          ? {
+              ...current,
+              likedByViewer: result.liked,
+              likeCount: Math.max(0, (current.likeCount || 0) + (result.liked ? 1 : -1)),
+            }
+          : current
+      );
+      await statuses.refetch();
     },
     onError: e => toast.error(e.message),
   });
@@ -1908,14 +2102,36 @@ function ProfileView({
         </div>
       )}
       {statusViewer && (
-        <div className="fixed inset-0 z-[90] grid place-items-center bg-black/95 p-5">
+        <div
+          className="fixed inset-0 z-[90] grid place-items-center bg-black/95 p-5"
+          onTouchStart={event => {
+            statusSwipeStartX.current = event.touches[0]?.clientX ?? null;
+          }}
+          onTouchEnd={event => {
+            const start = statusSwipeStartX.current;
+            statusSwipeStartX.current = null;
+            const end = event.changedTouches[0]?.clientX;
+            if (start === null || end === undefined) return;
+            const direction = statusSwipeDirection(end - start);
+            if (!direction) return;
+            const ownerStatuses = (statuses.data || []).filter(
+              (item: any) => item.author.id === statusViewer.ownerId
+            );
+            const currentIndex = ownerStatuses.findIndex(
+              (item: any) => item.id === statusViewer.id
+            );
+            const nextIndex = direction === "next" ? currentIndex + 1 : currentIndex - 1;
+            if (ownerStatuses[nextIndex])
+              viewStatus.mutate({ statusId: ownerStatuses[nextIndex].id });
+          }}
+        >
           <button
             className="absolute right-4 top-4 rounded-full bg-white/10 p-3 text-white"
             onClick={() => setStatusViewer(null)}
           >
             <X />
           </button>
-          <div className="max-w-xl text-center text-white">
+          <div className="max-w-xl text-center text-white" style={{ touchAction: "pan-y" }}>
             {statusViewer.imageUrl && (
               <img
                 src={statusViewer.imageUrl}
@@ -1927,9 +2143,11 @@ function ProfileView({
             {statusViewer.ownerId !== user.id && (
               <Button
                 className="mt-4 rounded-xl"
+                variant={statusViewer.likedByViewer ? "secondary" : "default"}
                 onClick={() => likeStatus.mutate({ statusId: statusViewer.id })}
               >
-                Like status
+                <Heart size={16} className={statusViewer.likedByViewer ? "fill-current" : ""} />
+                {statusViewer.likedByViewer ? "Unlike status" : "Like status"}
               </Button>
             )}
             {statusViewer.canSeeStats && (
@@ -2096,6 +2314,11 @@ function ProfileView({
                     : `${ratingCount} ${ratingCount === 1 ? "rating" : "ratings"}`}
                 </span>
               </div>
+              {typeof data.isOnline === "boolean" && (
+                <p className={`mt-2 text-xs ${data.isOnline ? "text-emerald-500" : "text-muted-foreground"}`}>
+                  {formatPresence(data.isOnline, data.lastSeenAt)}
+                </p>
+              )}
               <span className="mt-2 inline-flex rounded-full bg-secondary px-2 py-1 text-[10px] font-bold text-secondary-foreground">
                 {data.accountType === "designer" ? "DESIGNER" : "CLIENT"}
               </span>
@@ -2153,67 +2376,6 @@ function ProfileView({
                 onChange={e => setForm({ ...form, bio: e.target.value })}
                 placeholder="Professional bio"
               />
-              <div className="sm:col-span-2 rounded-2xl border bg-card p-3">
-                <p className="mb-2 text-xs font-bold uppercase tracking-wide text-primary">
-                  24-hour status
-                </p>
-                <div className="flex gap-2">
-                  <Input
-                    value={statusBody}
-                    onChange={e => setStatusBody(e.target.value)}
-                    placeholder="Share a status update"
-                  />
-                  <label className="grid h-10 w-10 shrink-0 cursor-pointer place-items-center rounded-xl bg-secondary text-primary">
-                    <FileImage size={16} />
-                    <input
-                      type="file"
-                      className="hidden"
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={e => {
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        if (file.size > 8 * 1024 * 1024)
-                          return toast.error(
-                            "Status images must be 8MB or smaller"
-                          );
-                        const r = new FileReader();
-                        r.onload = () => setStatusDataUrl(String(r.result));
-                        r.readAsDataURL(file);
-                      }}
-                    />
-                  </label>
-                  <Button
-                    type="button"
-                    className="rounded-xl"
-                    disabled={
-                      (!statusBody.trim() && !statusDataUrl) ||
-                      createStatus.isPending
-                    }
-                    onClick={() =>
-                      createStatus.mutate({
-                        body: statusBody,
-                        imageDataUrl: statusDataUrl || undefined,
-                      })
-                    }
-                  >
-                    Post
-                  </Button>
-                </div>
-                {statuses.data
-                  ?.filter(
-                    (item: any) =>
-                      item.author.id === user.id && item.canSeeStats
-                  )
-                  .map((item: any) => (
-                    <p
-                      key={item.id}
-                      className="mt-2 text-xs text-muted-foreground"
-                    >
-                      Your current status · {item.viewCount || 0} views ·{" "}
-                      {item.likeCount || 0} likes
-                    </p>
-                  ))}
-              </div>
               <Button
                 className="rounded-xl sm:col-span-2"
                 onClick={() =>
@@ -2256,6 +2418,35 @@ function ProfileView({
                 </span>
               ))}
           </div>
+          {(statuses.data || []).some((item: any) => item.author.id === data.id) && (
+            <section className="mt-6 border-t pt-4">
+              <h2 className="mb-3 text-sm font-bold">24-hour statuses</h2>
+              <div className="flex gap-3 overflow-x-auto pb-2">
+                {(statuses.data || [])
+                  .filter((item: any) => item.author.id === data.id)
+                  .map((item: any) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="w-32 shrink-0 overflow-hidden rounded-xl border bg-background text-left hover:bg-muted"
+                      onClick={() => viewStatus.mutate({ statusId: item.id })}
+                      aria-label="View active status"
+                    >
+                      {item.imageUrl ? (
+                        <img src={item.imageUrl} alt="" className="h-24 w-full object-cover" />
+                      ) : (
+                        <div className="flex h-24 items-center justify-center bg-primary/10 p-2 text-xs text-foreground">
+                          <span className="line-clamp-4">{item.body || "Photo status"}</span>
+                        </div>
+                      )}
+                      <span className="block truncate px-2 py-1.5 text-[11px] text-muted-foreground">
+                        {new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                    </button>
+                  ))}
+              </div>
+            </section>
+          )}
         </div>
         <div className="mt-8 flex items-center justify-between">
           <div>
@@ -3178,6 +3369,50 @@ function GridoraAiWidget({
     </>
   );
 }
+function PresenceHeartbeat({ userId }: { userId: number }) {
+  const heartbeat = trpc.auth.presence.heartbeat.useMutation();
+  const leave = trpc.auth.presence.leave.useMutation();
+  const [tabId] = useState(() =>
+    typeof window.crypto.randomUUID === "function"
+      ? window.crypto.randomUUID()
+      : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, character => {
+          const random = Math.floor(Math.random() * 16);
+          return (character === "x" ? random : (random & 0x3) | 0x8).toString(16);
+        })
+  );
+
+  useEffect(() => {
+    let active = true;
+    const markOnline = () => {
+      if (active && document.visibilityState === "visible")
+        heartbeat.mutate({ tabId });
+    };
+    const markOffline = () => {
+      if (active) leave.mutate({ tabId });
+    };
+    const onVisibilityChange = () =>
+      document.visibilityState === "visible" ? markOnline() : markOffline();
+    const onPageHide = () => {
+      const payload = new URLSearchParams({ tabId });
+      if (!navigator.sendBeacon("/api/presence/leave", payload)) markOffline();
+    };
+    markOnline();
+    const timer = window.setInterval(markOnline, 15_000);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", markOnline);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", markOnline);
+      window.removeEventListener("pagehide", onPageHide);
+      leave.mutate({ tabId });
+    };
+  }, [heartbeat.mutate, leave.mutate, tabId, userId]);
+  return null;
+}
+
 function AppShell({ user }: { user: any }) {
   const [tab, setTab] = useState<Tab>("chat");
   const [deepChat, setDeepChat] = useState<number | null>(null);
@@ -3200,6 +3435,7 @@ function AppShell({ user }: { user: any }) {
     <div
       className={`app-shell flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-background page-grid ${fullChat ? "" : "pb-[calc(4.5rem+env(safe-area-inset-bottom))] lg:pb-0"}`}
     >
+      <PresenceHeartbeat userId={user.id} />
       {projectId && (
         <div className="fixed inset-0 z-[100] grid place-items-center bg-black/70 p-4">
           <section className="max-h-[85dvh] w-full max-w-xl overflow-y-auto rounded-3xl border bg-card p-6 shadow-2xl">
@@ -3290,6 +3526,7 @@ function AppShell({ user }: { user: any }) {
         )}
         {tab === "discover" && (
           <DiscoverView
+            user={user}
             onOpenProfile={id => {
               setProfileId(id);
               setTab("profile");

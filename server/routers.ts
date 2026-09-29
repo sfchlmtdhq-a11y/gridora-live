@@ -53,15 +53,23 @@ import {
   statuses,
   statusLikes,
   statusViews,
+  userPresence,
   users,
   userBlocks,
 } from "../drizzle/schema";
 import { isGridoraPrimaryAdmin } from "../shared/admin-access";
 import { getDb, getUnreadNotifications, getUserById } from "./db";
 import { eraseGridoraAccountData } from "./adminUserData";
+import {
+  getPresenceForUsers,
+  markPresenceOffline,
+  markPresenceOnline,
+  markSessionOffline,
+} from "./presence";
 import { storagePut } from "./storage";
 import { gridoraAIRouter } from "./gridoraAIRouter";
 import { isFirstRegisteredAccount } from "./gridoraAI";
+import { getStatusExpiry } from "../shared/status-stories";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -401,8 +409,10 @@ export const appRouter = router({
         .find(v => v.startsWith("gridora_session="))
         ?.slice(16);
       const db = await getDb();
-      if (db && sessionId)
+      if (db && sessionId) {
+        await markSessionOffline(db, sessionId);
         await db.delete(sessions).where(eq(sessions.id, sessionId));
+      }
       ctx.res.clearCookie(COOKIE_NAME, {
         ...getSessionCookieOptions(ctx.req),
         maxAge: -1,
@@ -413,6 +423,36 @@ export const appRouter = router({
           maxAge: -1,
         });
       return { success: true };
+    }),
+    presence: router({
+      heartbeat: protectedProcedure
+        .input(z.object({ tabId: z.string().uuid() }))
+        .mutation(async ({ ctx, input }) => {
+          const db = await getDb();
+          const user = requireUser(ctx.user);
+          const sessionId = readCookie(ctx.req, "gridora_session");
+          if (!db || !sessionId)
+            throw new TRPCError({ code: "UNAUTHORIZED" });
+          const online = await markPresenceOnline(
+            db,
+            user.id,
+            sessionId,
+            input.tabId
+          );
+          if (!online) throw new TRPCError({ code: "UNAUTHORIZED" });
+          return { online: true };
+        }),
+      leave: protectedProcedure
+        .input(z.object({ tabId: z.string().uuid() }))
+        .mutation(async ({ ctx, input }) => {
+          const db = await getDb();
+          const user = requireUser(ctx.user);
+          const sessionId = readCookie(ctx.req, "gridora_session");
+          if (!db || !sessionId)
+            throw new TRPCError({ code: "UNAUTHORIZED" });
+          await markPresenceOffline(db, user.id, sessionId, input.tabId);
+          return { online: false };
+        }),
     }),
   }),
   profile: router({
@@ -834,10 +874,16 @@ export const appRouter = router({
           )
           .orderBy(desc(users.reputation))
           .limit(40);
+        const connectedIds = rows
+          .filter(person => relationshipByUser.get(person.id) === "connected")
+          .map(person => person.id);
+        const presence = await getPresenceForUsers(db, connectedIds);
         return rows.map(person => ({
           ...safeUser(person),
           connectionStatus: relationshipByUser.get(person.id) || "connect",
           isHidden: hiddenContactIds.has(person.id),
+          isOnline: presence.get(person.id)?.isOnline ?? false,
+          lastSeenAt: presence.get(person.id)?.lastSeenAt ?? null,
         }));
       }),
     profile: publicProcedure
@@ -852,6 +898,35 @@ export const appRouter = router({
           (await areUsersBlocked(db, ctx.user.id, input.id))
         )
           return null;
+        let presence: { isOnline: boolean; lastSeenAt: Date | null } | undefined;
+        if (ctx.user?.id === input.id) {
+          const current = await getPresenceForUsers(db, [input.id]);
+          presence = current.get(input.id) || { isOnline: false, lastSeenAt: null };
+        } else if (ctx.user) {
+          const relationship = await db
+            .select({ id: connectionRequests.id })
+            .from(connectionRequests)
+            .where(
+              and(
+                eq(connectionRequests.status, "accepted"),
+                or(
+                  and(
+                    eq(connectionRequests.senderId, ctx.user.id),
+                    eq(connectionRequests.receiverId, input.id)
+                  ),
+                  and(
+                    eq(connectionRequests.senderId, input.id),
+                    eq(connectionRequests.receiverId, ctx.user.id)
+                  )
+                )
+              )
+            )
+            .limit(1);
+          if (relationship.length) {
+            const current = await getPresenceForUsers(db, [input.id]);
+            presence = current.get(input.id) || { isOnline: false, lastSeenAt: null };
+          }
+        }
         const [portfolio, userReviews, availability] = await Promise.all([
           db
             .select()
@@ -880,6 +955,7 @@ export const appRouter = router({
         );
         return {
           ...safeUser(user),
+          ...(presence || {}),
           portfolio,
           reviews: userReviews,
           ratingCount,
@@ -1233,14 +1309,28 @@ export const appRouter = router({
           return {
             ...chat,
             partner: other
-              ? { ...safeUser(other), lastSignedIn: other.lastSignedIn }
+              ? safeUser(other)
               : null,
           };
         })
       );
-      return visibleChats.filter(
+      const visible = visibleChats.filter(
         (chat): chat is NonNullable<typeof chat> => chat !== null
       );
+      const presence = await getPresenceForUsers(
+        db,
+        visible.flatMap(chat => (chat.partner ? [chat.partner.id] : []))
+      );
+      return visible.map(chat => ({
+        ...chat,
+        partner: chat.partner
+          ? {
+              ...chat.partner,
+              isOnline: presence.get(chat.partner.id)?.isOnline ?? false,
+              lastSeenAt: presence.get(chat.partner.id)?.lastSeenAt ?? null,
+            }
+          : null,
+      }));
     }),
     messages: protectedProcedure
       .input(
@@ -1860,7 +1950,17 @@ export const appRouter = router({
       const db = await getDb();
       const viewer = requireUser(ctx.user);
       if (!db) return [];
-      await db.delete(statuses).where(lt(statuses.expiresAt, new Date()));
+      const now = new Date();
+      const expiredRows = await db
+        .select({ id: statuses.id })
+        .from(statuses)
+        .where(lt(statuses.expiresAt, now));
+      const expiredIds = expiredRows.map(row => row.id);
+      if (expiredIds.length) {
+        await db.delete(statusLikes).where(inArray(statusLikes.statusId, expiredIds));
+        await db.delete(statusViews).where(inArray(statusViews.statusId, expiredIds));
+        await db.delete(statuses).where(inArray(statuses.id, expiredIds));
+      }
       const acceptedConnections = await db
         .select({
           senderId: connectionRequests.senderId,
@@ -1901,15 +2001,31 @@ export const appRouter = router({
         .where(gt(statuses.expiresAt, new Date()))
         .orderBy(desc(statuses.createdAt))
         .limit(100);
-      return rows
+      const visible = rows
         .filter(({ status }) => allowedUserIds.has(status.userId))
         .map(({ status, author }) => ({
           ...status,
           author: safeUser(author),
           canSeeStats: status.userId === viewer.id,
-          viewCount: status.userId === viewer.id ? status.viewCount : undefined,
-          likeCount: status.userId === viewer.id ? status.likeCount : undefined,
         }));
+      const likedRows = visible.length
+        ? await db
+            .select({ statusId: statusLikes.statusId })
+            .from(statusLikes)
+            .where(
+              and(
+                eq(statusLikes.userId, viewer.id),
+                inArray(statusLikes.statusId, visible.map(item => item.id))
+              )
+            )
+        : [];
+      const likedIds = new Set(likedRows.map(row => row.statusId));
+      return visible.map(status => ({
+        ...status,
+        viewCount: status.canSeeStats ? status.viewCount : undefined,
+        likeCount: status.canSeeStats ? status.likeCount : undefined,
+        likedByViewer: likedIds.has(status.id),
+      }));
     }),
     create: protectedProcedure
       .input(
@@ -1929,9 +2045,10 @@ export const appRouter = router({
           });
         let imageUrl: string | undefined;
         if (input.imageDataUrl) {
-          if (
-            !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(input.imageDataUrl)
-          )
+          const imageType = input.imageDataUrl.match(
+            /^data:image\/(png|jpeg|jpg|webp);base64,/
+          )?.[1];
+          if (!imageType)
             throw new TRPCError({
               code: "BAD_REQUEST",
               message: "Use a PNG, JPG, or WebP image",
@@ -1947,9 +2064,9 @@ export const appRouter = router({
             });
           imageUrl = (
             await storagePut(
-              `${user.id}-statuses/${Date.now()}.jpg`,
+              `${user.id}-statuses/${Date.now()}.${imageType === "jpeg" ? "jpg" : imageType}`,
               buffer,
-              "image/jpeg"
+              imageType === "jpg" ? "image/jpeg" : `image/${imageType}`
             )
           ).url;
         }
@@ -1957,7 +2074,7 @@ export const appRouter = router({
           userId: user.id,
           body: input.body?.trim() || "",
           imageUrl,
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          expiresAt: getStatusExpiry(),
         });
         return { id: Number(result[0].insertId) };
       }),
@@ -2031,11 +2148,25 @@ export const appRouter = router({
               .where(eq(statuses.id, status.id));
           }
         }
+        const liked = await db
+          .select({ id: statusLikes.id })
+          .from(statusLikes)
+          .where(
+            and(
+              eq(statusLikes.statusId, status.id),
+              eq(statusLikes.userId, viewer.id)
+            )
+          )
+          .limit(1);
         return {
           id: status.id,
+          userId: status.userId,
+          createdAt: status.createdAt,
+          expiresAt: status.expiresAt,
           imageUrl: status.imageUrl,
           body: status.body,
           ownerId: status.userId,
+          likedByViewer: liked.length > 0,
           canSeeStats: status.userId === viewer.id,
           viewCount: status.userId === viewer.id ? status.viewCount : undefined,
           likeCount: status.userId === viewer.id ? status.likeCount : undefined,
@@ -2175,15 +2306,30 @@ export const appRouter = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (db)
+        if (db) {
+          const owner = requireUser(ctx.user);
+          const status = (
+            await db
+              .select({ id: statuses.id })
+              .from(statuses)
+              .where(
+                and(eq(statuses.id, input.id), eq(statuses.userId, owner.id))
+              )
+              .limit(1)
+          )[0];
+          if (status) {
+            await db.delete(statusLikes).where(eq(statusLikes.statusId, status.id));
+            await db.delete(statusViews).where(eq(statusViews.statusId, status.id));
+          }
           await db
             .delete(statuses)
             .where(
               and(
                 eq(statuses.id, input.id),
-                eq(statuses.userId, requireUser(ctx.user).id)
+                eq(statuses.userId, owner.id)
               )
             );
+        }
         return { success: true };
       }),
   }),

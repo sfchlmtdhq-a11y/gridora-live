@@ -26,6 +26,7 @@ import {
   statuses,
   statusLikes,
   statusViews,
+  userPresence,
   userBlocks,
   users,
 } from "../drizzle/schema";
@@ -215,5 +216,6 @@ export async function eraseGridoraAccountData(
   await tx.delete(adminSessions).where(eq(adminSessions.userId, userId));
   await tx.delete(adminUsers).where(eq(adminUsers.userId, userId));
   await tx.delete(sessions).where(eq(sessions.userId, userId));
+  await tx.delete(userPresence).where(eq(userPresence.userId, userId));
   await tx.delete(users).where(eq(users.id, userId));
 }

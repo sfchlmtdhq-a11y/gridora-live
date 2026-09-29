@@ -66,6 +66,20 @@ export const sessions = mysqlTable(
   },
   table => ({ userIdx: index("sessions_user_idx").on(table.userId) })
 );
+export const userPresence = mysqlTable(
+  "user_presence",
+  {
+    sessionKey: varchar("sessionKey", { length: 64 }).primaryKey(),
+    sessionHash: varchar("sessionHash", { length: 64 }).notNull(),
+    userId: int("userId").notNull(),
+    isOnline: boolean("isOnline").default(true).notNull(),
+    lastSeenAt: timestamp("lastSeenAt").notNull(),
+  },
+  table => ({
+    sessionIdx: index("user_presence_session_idx").on(table.sessionHash),
+    userIdx: index("user_presence_user_idx").on(table.userId, table.lastSeenAt),
+  })
+);
 export const connectionRequests = mysqlTable(
   "connection_requests",
   {

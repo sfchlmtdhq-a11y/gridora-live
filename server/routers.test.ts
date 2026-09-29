@@ -107,6 +107,12 @@ describe("Gridora public procedures", () => {
   it("returns a signed-out state instead of invoking external OAuth", async () => {
     const caller = appRouter.createCaller(publicContext());
     await expect(caller.auth.me()).resolves.toBeNull();
+    await expect(
+      caller.auth.presence.heartbeat({ tabId: "00000000-0000-4000-8000-000000000001" })
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(
+      caller.auth.presence.leave({ tabId: "00000000-0000-4000-8000-000000000001" })
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     await expect(caller.gridoraAI.threads()).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
